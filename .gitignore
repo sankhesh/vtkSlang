@@ -1,0 +1,16 @@
+# Build directories
+/build/
+/bld/
+/out/
+
+# Local CMake user presets (machine-specific paths) and preset includes
+CMakeUserPresets.json
+cpresets/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# OS cruft
+.DS_Store
