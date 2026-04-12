@@ -1,0 +1,8 @@
+// Copyright 2026 Sankhesh Jhaveri
+// SPDX-License-Identifier: BSD-3-Clause
+#pragma once
+
+#define VTKSLANG_VERSION_MAJOR @vtkSlang_VERSION_MAJOR@
+#define VTKSLANG_VERSION_MINOR @vtkSlang_VERSION_MINOR@
+#define VTKSLANG_VERSION_PATCH @vtkSlang_VERSION_PATCH@
+#define VTKSLANG_VERSION_STRING "@vtkSlang_VERSION@"
