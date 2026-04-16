@@ -134,3 +134,9 @@ install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/vtkSlangConfig.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/vtkSlangConfigVersion.cmake"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/vtkSlang")
+
+option(VTKSLANG_BUILD_TESTING "Build vtkSlang tests" ${PROJECT_IS_TOP_LEVEL})
+if(VTKSLANG_BUILD_TESTING)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
