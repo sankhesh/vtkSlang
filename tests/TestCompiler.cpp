@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,42 @@ void doubleIt(uint3 id : SV_DispatchThreadID) { data[id.x] = data[id.x] * 2.f * 
     "a second compiler shares the global session");
 }
 
+void testOptions(vtkslang::vtkSlangCompiler& compiler)
+{
+  const char* scaled = R"(
+#ifndef SCALE
+#define SCALE 1.0f
+#endif
+[vk::binding(0, 0)] RWStructuredBuffer<float> data;
+[shader("compute")] [numthreads(64, 1, 1)]
+void scale(uint3 id : SV_DispatchThreadID) { data[id.x] = data[id.x] * SCALE; }
+)";
+  vtkslang::CompileOptions withDefine;
+  withDefine.defines = { { "SCALE", "7.25f" } };
+  vtkslang::Artifact plain   = compiler.compileSource(scaled);
+  vtkslang::Artifact defined = compiler.compileSource(scaled, {}, withDefine);
+  check(plain && defined && defined.wgsl.find("7.25") != std::string::npos &&
+      plain.wgsl.find("7.25") == std::string::npos,
+    "defines reach the preprocessor");
+
+  const std::string dir = VTKSLANG_TEST_TMP_DIR;
+  {
+    std::ofstream out(dir + "/vtkslang_test_helpers.slang");
+    out << "module vtkslang_test_helpers;\npublic float triple(float x) { return 3.f * x; }\n";
+  }
+  const char* importer = R"(
+import vtkslang_test_helpers;
+[vk::binding(0, 0)] RWStructuredBuffer<float> data;
+[shader("compute")] [numthreads(64, 1, 1)]
+void run(uint3 id : SV_DispatchThreadID) { data[id.x] = triple(data[id.x]); }
+)";
+  vtkslang::CompileOptions withPath;
+  withPath.searchPaths = { dir };
+  check(!compiler.compileSource(importer), "unknown import fails without a search path");
+  check(static_cast<bool>(compiler.compileSource(importer, {}, withPath)),
+    "search paths resolve imports");
+}
+
 void testDisableEnv(vtkslang::vtkSlangCompiler& compiler)
 {
 #ifdef _WIN32
@@ -72,6 +109,7 @@ int main()
   vtkslang::vtkSlangCompiler compiler;
   if (vtkslang::vtkSlangCompiler::slangAvailable()) {
     testSlang(compiler);
+    testOptions(compiler);
   } else {
     std::printf("SKIP: Slang unavailable\n");
   }
