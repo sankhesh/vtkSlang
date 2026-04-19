@@ -77,15 +77,38 @@ foreach(_header IN ITEMS vtkSlang.h vtkSlangCompiler.h)
     COPYONLY)
 endforeach()
 
+set(_SHADER_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+set(_SOURCES_HDR  "${CMAKE_CURRENT_BINARY_DIR}/vtkSlangSources.h")
+
+set(_SLANG_FILES
+  "${_SHADER_DIR}/vtkslang_core.slang")
+
+add_custom_command(
+  OUTPUT  "${_SOURCES_HDR}"
+  COMMAND "${CMAKE_COMMAND}"
+    -DSHADER_DIR=${_SHADER_DIR}
+    -DOUT_HEADER=${_SOURCES_HDR}
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake"
+  DEPENDS ${_SLANG_FILES}
+          "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake"
+  COMMENT "Embedding Slang shader sources into vtkSlangSources.h"
+  VERBATIM)
+
+add_custom_target(vtkSlang_embed_shaders DEPENDS "${_SOURCES_HDR}")
+
 add_library(vtkSlang SHARED
   vtkSlangCompiler.cpp)
 
 add_library(vtkSlang::vtkSlang ALIAS vtkSlang)
 
+add_dependencies(vtkSlang vtkSlang_embed_shaders)
+
 target_include_directories(vtkSlang
   PUBLIC
     $<BUILD_INTERFACE:${_PUBLIC_INCLUDE_DIR}>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/vtkSlang>)
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/vtkSlang>
+  PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}")
 
 if(VTKSLANG_SLANG_ENABLED)
   target_link_libraries(vtkSlang PRIVATE Slang::Slang)
@@ -110,6 +133,10 @@ install(FILES
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangVersion.h"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangExport.h"
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vtkSlang)
+
+install(DIRECTORY shaders/
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/vtkSlang/shaders
+  FILES_MATCHING PATTERN "*.slang")
 
 install(EXPORT vtkSlangTargets
   FILE      vtkSlangTargets.cmake

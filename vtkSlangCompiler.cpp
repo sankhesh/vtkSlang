@@ -18,6 +18,8 @@
 #  endif
 #endif
 
+#include "vtkSlangSources.h"
+
 namespace vtkslang {
 
 namespace {
@@ -35,6 +37,8 @@ Artifact failure(Target target, std::string message)
   a.diagnostics = std::move(message);
   return a;
 }
+
+const char* const kLibraryModules[] = { "vtkslang_core" };
 
 #ifdef VTKSLANG_USE_SLANG
 
@@ -88,6 +92,20 @@ struct vtkSlangCompiler::SlangState
     return (options.target == Target::WGSL) ? "wgsl" : "spirv";
   }
 
+  slang::IModule* loadEmbedded(TargetSession& ts, const char* name, std::string& diagnostics)
+  {
+    auto it = ts.modules.find(name);
+    if (it != ts.modules.end())
+      return it->second;
+
+    const char* source = vtkSlangSources::get(name);
+    if (!source) {
+      diagnostics += std::string("vtkSlang: no embedded source named '") + name + "'\n";
+      return nullptr;
+    }
+    return loadSource(ts, name, source, diagnostics);
+  }
+
   slang::IModule* loadSource(TargetSession& ts, const std::string& name, const char* source,
                              std::string& diagnostics)
   {
@@ -128,6 +146,14 @@ struct vtkSlangCompiler::SlangState
       std::lock_guard<std::mutex> lock(globalSessionMutex());
       if (SLANG_FAILED(global->createSession(sd, ts.session.writeRef()))) {
         diagnostics += "vtkSlang: failed to create a Slang session\n";
+        return nullptr;
+      }
+    }
+
+    for (const char* name : kLibraryModules) {
+      if (!loadEmbedded(ts, name, diagnostics)) {
+        ts.session = nullptr;
+        ts.modules.clear();
         return nullptr;
       }
     }
