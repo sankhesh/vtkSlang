@@ -22,9 +22,10 @@ void check(bool ok, const char* what)
 void testSlang(vtkslang::vtkSlangCompiler& compiler)
 {
   const char* user = R"(
+import vtkslang_core;
 [vk::binding(0, 0)] RWStructuredBuffer<float> data;
 [shader("compute")] [numthreads(64, 1, 1)]
-void doubleIt(uint3 id : SV_DispatchThreadID) { data[id.x] = data[id.x] * 2.f; }
+void doubleIt(uint3 id : SV_DispatchThreadID) { data[id.x] = data[id.x] * 2.f * PI; }
 )";
   vtkslang::CompileOptions spirv;
   spirv.target = vtkslang::Target::SPIRV;
@@ -35,7 +36,7 @@ void doubleIt(uint3 id : SV_DispatchThreadID) { data[id.x] = data[id.x] * 2.f; }
 
   vtkslang::Artifact u = compiler.compileSource(user);
   check(u && u.wgsl.find("fn doubleIt") != std::string::npos,
-    "user source compiles, entry points discovered");
+    "user source importing vtkslang_core compiles, entry points discovered");
 
   vtkslang::Artifact named = compiler.compileSource(user, { "doubleIt" });
   check(named && named.source == vtkslang::ArtifactSource::Slang, "explicit entry point list");
