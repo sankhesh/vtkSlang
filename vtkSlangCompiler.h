@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace vtkslang {
@@ -38,6 +39,10 @@ struct Artifact
 struct CompileOptions
 {
   Target target = Target::WGSL;
+
+  std::vector<std::pair<std::string, std::string>> defines;
+
+  std::vector<std::string> searchPaths;
 };
 
 class VTKSLANG_EXPORT vtkSlangCompiler

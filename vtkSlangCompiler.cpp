@@ -89,7 +89,12 @@ struct vtkSlangCompiler::SlangState
 
   static std::string sessionKey(const CompileOptions& options)
   {
-    return (options.target == Target::WGSL) ? "wgsl" : "spirv";
+    std::string key = (options.target == Target::WGSL) ? "wgsl" : "spirv";
+    for (const auto& d : options.defines)
+      key += "\nD" + d.first + "=" + d.second;
+    for (const auto& p : options.searchPaths)
+      key += "\nI" + p;
+    return key;
   }
 
   slang::IModule* loadEmbedded(TargetSession& ts, const char* name, std::string& diagnostics)
@@ -141,6 +146,18 @@ struct vtkSlangCompiler::SlangState
     sd.targets     = &td;
     sd.targetCount = 1;
     sd.defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_COLUMN_MAJOR;
+
+    std::vector<slang::PreprocessorMacroDesc> macros;
+    for (const auto& d : options.defines)
+      macros.push_back({ d.first.c_str(), d.second.c_str() });
+    sd.preprocessorMacros     = macros.data();
+    sd.preprocessorMacroCount = static_cast<SlangInt>(macros.size());
+
+    std::vector<const char*> paths;
+    for (const auto& p : options.searchPaths)
+      paths.push_back(p.c_str());
+    sd.searchPaths     = paths.data();
+    sd.searchPathCount = static_cast<SlangInt>(paths.size());
 
     {
       std::lock_guard<std::mutex> lock(globalSessionMutex());
