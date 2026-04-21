@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 
 #ifdef VTKSLANG_USE_SLANG
@@ -16,6 +17,8 @@
 #  ifndef SLANG_TAG_VERSION
 #    define SLANG_TAG_VERSION "unknown"
 #  endif
+
+#  include <regex>
 #endif
 
 #include "vtkSlangSources.h"
@@ -61,6 +64,16 @@ slang::IGlobalSession* globalSession()
   return session;
 }
 
+uint64_t fnv1a(std::string_view s)
+{
+  uint64_t h = 1469598103934665603ull;
+  for (unsigned char c : s) {
+    h ^= c;
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
 void appendDiagnostics(std::string& out, slang::IBlob* blob)
 {
   if (blob && blob->getBufferSize() > 0) {
@@ -81,7 +94,56 @@ struct vtkSlangCompiler::SlangState
   {
     Slang::ComPtr<slang::ISession> session;
     std::unordered_map<std::string, slang::IModule*> modules;
+    std::unordered_map<std::string, uint64_t> moduleSourceHashes;
   };
+
+  static std::string declaredModuleName(const std::string& source)
+  {
+    static const std::regex decl(R"((^|\n)\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
+    std::smatch m;
+    return std::regex_search(source, m, decl) ? m[2].str() : std::string();
+  }
+
+  bool loadOptionModules(TargetSession*& ts, const CompileOptions& options,
+                         std::vector<slang::IModule*>& out, std::string& diagnostics)
+  {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      out.clear();
+      bool redefined = false;
+      for (const std::string& source : options.modules) {
+        std::string name = declaredModuleName(source);
+        for (const char* lib : kLibraryModules) {
+          if (name == lib) {
+            diagnostics += "vtkSlang: module name '" + name + "' is reserved\n";
+            return false;
+          }
+        }
+        if (name.empty())
+          name = "vtkslang_user_" + std::to_string(userModuleCount++);
+
+        const uint64_t hash  = fnv1a(source);
+        auto           known = ts->moduleSourceHashes.find(name);
+        if (known != ts->moduleSourceHashes.end() && known->second != hash) {
+          redefined = true;
+          break;
+        }
+        slang::IModule* m = known != ts->moduleSourceHashes.end()
+          ? ts->modules[name]
+          : loadSource(*ts, name, source.c_str(), diagnostics);
+        if (!m)
+          return false;
+        ts->moduleSourceHashes[name] = hash;
+        out.push_back(m);
+      }
+      if (!redefined)
+        return true;
+      sessions.erase(sessionKey(options));
+      ts = session(options, diagnostics);
+      if (!ts)
+        return false;
+    }
+    return false;
+  }
 
   std::mutex mutex;
   std::unordered_map<std::string, TargetSession> sessions;
@@ -178,6 +240,7 @@ struct vtkSlangCompiler::SlangState
   }
 
   Artifact compile(TargetSession& ts, const CompileOptions& options, slang::IModule* module,
+                   const std::vector<slang::IModule*>& extra,
                    const std::vector<std::string>& entryPoints, std::string diagnostics)
   {
     const Target target = options.target;
@@ -201,6 +264,8 @@ struct vtkSlangCompiler::SlangState
     }
 
     std::vector<slang::IComponentType*> components{ module };
+    for (slang::IModule* m : extra)
+      components.push_back(m);
     for (auto& ep : eps)
       components.push_back(ep.get());
 
@@ -282,12 +347,15 @@ Artifact vtkSlangCompiler::compileSource(const std::string& source,
   auto* ts = m_slang->session(options, diagnostics);
   if (!ts)
     return failure(options.target, diagnostics);
+  std::vector<slang::IModule*> extra;
+  if (!m_slang->loadOptionModules(ts, options, extra, diagnostics))
+    return failure(options.target, diagnostics);
 
   std::string name = "vtkslang_user_" + std::to_string(m_slang->userModuleCount++);
   slang::IModule* module = m_slang->loadSource(*ts, name, source.c_str(), diagnostics);
   if (!module)
     return failure(options.target, diagnostics);
-  return m_slang->compile(*ts, options, module, entryPoints, std::move(diagnostics));
+  return m_slang->compile(*ts, options, module, extra, entryPoints, std::move(diagnostics));
 #else
   (void)source;
   (void)entryPoints;

@@ -43,6 +43,8 @@ struct CompileOptions
   std::vector<std::pair<std::string, std::string>> defines;
 
   std::vector<std::string> searchPaths;
+
+  std::vector<std::string> modules;
 };
 
 class VTKSLANG_EXPORT vtkSlangCompiler
