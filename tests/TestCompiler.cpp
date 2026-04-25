@@ -90,6 +90,34 @@ void run(uint3 id : SV_DispatchThreadID) { data[id.x] = triple(data[id.x]); }
     "search paths resolve imports");
 }
 
+void testModules(vtkslang::vtkSlangCompiler& compiler)
+{
+  const char* user = R"(
+import test_helpers;
+[vk::binding(0, 0)] RWStructuredBuffer<float> data;
+[shader("compute")] [numthreads(64, 1, 1)]
+void run(uint3 id : SV_DispatchThreadID) { data[id.x] = twice(data[id.x]); }
+)";
+  vtkslang::CompileOptions original;
+  original.modules = { "module test_helpers;\npublic float twice(float x) { return 2.f * x; }\n" };
+  vtkslang::Artifact a = compiler.compileSource(user, {}, original);
+  check(a && a.wgsl.find("fn run") != std::string::npos,
+    "a source imports a consumer module by its declared name");
+
+  vtkslang::CompileOptions edited;
+  edited.modules = { "module test_helpers;\npublic float twice(float x) { return 3.f * x; }\n" };
+  vtkslang::Artifact b = compiler.compileSource(user, {}, edited);
+  check(b && b.wgsl != a.wgsl, "a module redefined with new source is recompiled, not reused");
+  check(compiler.compileSource(user, {}, original).wgsl == a.wgsl,
+    "switching back to the original module source works");
+
+  vtkslang::CompileOptions reserved;
+  reserved.modules = { "module vtkslang_core;\npublic float f() { return 1.f; }\n" };
+  vtkslang::Artifact clash = compiler.compileSource(user, {}, reserved);
+  check(!clash && clash.diagnostics.find("reserved") != std::string::npos,
+    "library module names are reserved");
+}
+
 void testDisableEnv(vtkslang::vtkSlangCompiler& compiler)
 {
 #ifdef _WIN32
@@ -110,6 +138,7 @@ int main()
   if (vtkslang::vtkSlangCompiler::slangAvailable()) {
     testSlang(compiler);
     testOptions(compiler);
+    testModules(compiler);
   } else {
     std::printf("SKIP: Slang unavailable\n");
   }
