@@ -23,6 +23,7 @@ enum class ArtifactSource
 {
   None,
   Slang,
+  Precompiled,
 };
 
 struct Artifact
@@ -47,6 +48,15 @@ struct CompileOptions
   std::vector<std::string> modules;
 };
 
+struct Program
+{
+  std::string              name;
+  std::string              source;
+  std::vector<std::string> modules;
+  std::vector<std::string> entryPoints;
+  std::vector<Artifact>    precompiled;
+};
+
 class VTKSLANG_EXPORT vtkSlangCompiler
 {
 public:
@@ -65,7 +75,12 @@ public:
                          const std::vector<std::string>& entryPoints = {},
                          const CompileOptions& options = {});
 
+  Artifact compileProgram(const Program& program, const CompileOptions& options = {});
+
 private:
+  Artifact compileText(const std::string& source, const std::vector<std::string>& programModules,
+                       const std::vector<std::string>& entryPoints, const CompileOptions& options);
+
   struct SlangState;
   std::unique_ptr<SlangState> m_slang;
 };

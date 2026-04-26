@@ -338,29 +338,59 @@ Artifact vtkSlangCompiler::compileSource(const std::string& source,
                                          const std::vector<std::string>& entryPoints,
                                          const CompileOptions& options)
 {
+  return compileText(source, {}, entryPoints, options);
+}
+
+Artifact vtkSlangCompiler::compileText(const std::string& source,
+                                       const std::vector<std::string>& programModules,
+                                       const std::vector<std::string>& entryPoints,
+                                       const CompileOptions& options)
+{
 #ifdef VTKSLANG_USE_SLANG
   if (slangDisabledByEnv())
     return failure(options.target, "vtkSlang: Slang is disabled\n");
 
+  CompileOptions merged = options;
+  merged.modules.insert(merged.modules.begin(), programModules.begin(), programModules.end());
+
   std::lock_guard<std::mutex> lock(m_slang->mutex);
   std::string diagnostics;
-  auto* ts = m_slang->session(options, diagnostics);
+  auto* ts = m_slang->session(merged, diagnostics);
   if (!ts)
-    return failure(options.target, diagnostics);
+    return failure(merged.target, diagnostics);
   std::vector<slang::IModule*> extra;
-  if (!m_slang->loadOptionModules(ts, options, extra, diagnostics))
-    return failure(options.target, diagnostics);
+  if (!m_slang->loadOptionModules(ts, merged, extra, diagnostics))
+    return failure(merged.target, diagnostics);
 
   std::string name = "vtkslang_user_" + std::to_string(m_slang->userModuleCount++);
   slang::IModule* module = m_slang->loadSource(*ts, name, source.c_str(), diagnostics);
   if (!module)
-    return failure(options.target, diagnostics);
-  return m_slang->compile(*ts, options, module, extra, entryPoints, std::move(diagnostics));
+    return failure(merged.target, diagnostics);
+  return m_slang->compile(*ts, merged, module, extra, entryPoints, std::move(diagnostics));
 #else
   (void)source;
+  (void)programModules;
   (void)entryPoints;
   return failure(options.target, "vtkSlang: built without Slang\n");
 #endif
+}
+
+Artifact vtkSlangCompiler::compileProgram(const Program& program, const CompileOptions& options)
+{
+  const bool plain =
+    options.defines.empty() && options.searchPaths.empty() && options.modules.empty();
+  if (plain) {
+    for (const Artifact& precompiled : program.precompiled) {
+      const bool present = precompiled.target == Target::WGSL ? !precompiled.wgsl.empty()
+                                                              : !precompiled.spirv.empty();
+      if (precompiled.target == options.target && present) {
+        Artifact a = precompiled;
+        a.source   = ArtifactSource::Precompiled;
+        return a;
+      }
+    }
+  }
+  return compileText(program.source, program.modules, program.entryPoints, options);
 }
 
 }
