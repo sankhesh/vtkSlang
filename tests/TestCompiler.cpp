@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -20,21 +21,41 @@ void check(bool ok, const char* what)
     ++g_failures;
 }
 
+std::string readFile(const std::string& path)
+{
+  std::ifstream in(path, std::ios::binary);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+vtkslang::Program surfaceHost()
+{
+  vtkslang::Program p;
+  p.name   = "surface_host";
+  p.source = readFile(VTKSLANG_SOURCE_DIR "/tests/data/surface_host.slang");
+  vtkslang::Artifact precompiled;
+  precompiled.target = vtkslang::Target::WGSL;
+  precompiled.wgsl   = "// precompiled surface_host\n";
+  p.precompiled.push_back(precompiled);
+  return p;
+}
+
 void testSlang(vtkslang::vtkSlangCompiler& compiler)
 {
+  vtkslang::CompileOptions spirv;
+  spirv.target = vtkslang::Target::SPIRV;
+  vtkslang::Artifact a = compiler.compileProgram(surfaceHost(), spirv);
+  check(a && a.source == vtkslang::ArtifactSource::Slang && !a.spirv.empty() &&
+      a.spirv[0] == 0x07230203u,
+    "a program compiles to SPIR-V");
+
   const char* user = R"(
 import vtkslang_core;
 [vk::binding(0, 0)] RWStructuredBuffer<float> data;
 [shader("compute")] [numthreads(64, 1, 1)]
 void doubleIt(uint3 id : SV_DispatchThreadID) { data[id.x] = data[id.x] * 2.f * PI; }
 )";
-  vtkslang::CompileOptions spirv;
-  spirv.target = vtkslang::Target::SPIRV;
-  vtkslang::Artifact a = compiler.compileSource(user, {}, spirv);
-  check(a && a.source == vtkslang::ArtifactSource::Slang && !a.spirv.empty() &&
-      a.spirv[0] == 0x07230203u,
-    "a source compiles to SPIR-V");
-
   vtkslang::Artifact u = compiler.compileSource(user);
   check(u && u.wgsl.find("fn doubleIt") != std::string::npos,
     "user source importing vtkslang_core compiles, entry points discovered");
@@ -90,6 +111,45 @@ void run(uint3 id : SV_DispatchThreadID) { data[id.x] = triple(data[id.x]); }
     "search paths resolve imports");
 }
 
+void testProgramWithoutSlang(vtkslang::vtkSlangCompiler& compiler)
+{
+  const vtkslang::Program p = surfaceHost();
+  vtkslang::Artifact      a = compiler.compileProgram(p);
+  check(a && a.source == vtkslang::ArtifactSource::Precompiled && a.wgsl == p.precompiled[0].wgsl,
+    "a plain program request returns its precompiled artifact");
+}
+
+void testProgram(vtkslang::vtkSlangCompiler& compiler)
+{
+  const vtkslang::Program p = surfaceHost();
+
+  vtkslang::CompileOptions spirv;
+  spirv.target         = vtkslang::Target::SPIRV;
+  vtkslang::Artifact s = compiler.compileProgram(p, spirv);
+  check(s && s.source == vtkslang::ArtifactSource::Slang && !s.spirv.empty(),
+    "a target without a precompiled artifact compiles with Slang");
+
+  vtkslang::CompileOptions defined;
+  defined.defines      = { { "UNUSED", "1" } };
+  vtkslang::Artifact v = compiler.compileProgram(p, defined);
+  check(v && v.source == vtkslang::ArtifactSource::Slang,
+    "a program request with a define compiles with Slang");
+
+  vtkslang::Program helper;
+  helper.name    = "with_helper";
+  helper.modules = { "module host_util;\npublic float brighten(float x) { return 2.f * x; }\n" };
+  helper.source  = R"(
+import host_util;
+[vk::binding(0, 0)] RWStructuredBuffer<float> data;
+[shader("compute")] [numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) { data[id.x] = brighten(data[id.x]); }
+)";
+  vtkslang::CompileOptions user;
+  user.modules = { "module user_util;\nimport host_util;\npublic float twice(float x) { return brighten(brighten(x)); }\n" };
+  check(static_cast<bool>(compiler.compileProgram(helper, user)),
+    "program modules load before user modules, which can import them");
+}
+
 void testModules(vtkslang::vtkSlangCompiler& compiler)
 {
   const char* user = R"(
@@ -128,6 +188,8 @@ void testDisableEnv(vtkslang::vtkSlangCompiler& compiler)
   check(!vtkslang::vtkSlangCompiler::slangAvailable(), "VTKSLANG_DISABLE_SLANG=1 disables Slang");
   check(!compiler.compileSource("[shader(\"compute\")][numthreads(1,1,1)] void m() {}"),
     "compileSource fails when Slang is disabled");
+  check(compiler.compileProgram(surfaceHost()).source == vtkslang::ArtifactSource::Precompiled,
+    "precompiled programs still work when Slang is disabled");
 }
 
 }
@@ -135,7 +197,10 @@ void testDisableEnv(vtkslang::vtkSlangCompiler& compiler)
 int main()
 {
   vtkslang::vtkSlangCompiler compiler;
+  testProgramWithoutSlang(compiler);
+
   if (vtkslang::vtkSlangCompiler::slangAvailable()) {
+    testProgram(compiler);
     testSlang(compiler);
     testOptions(compiler);
     testModules(compiler);

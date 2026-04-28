@@ -4,6 +4,7 @@
 add_executable(vtkSlangTestCompiler TestCompiler.cpp)
 target_link_libraries(vtkSlangTestCompiler PRIVATE vtkSlang::vtkSlang)
 target_compile_definitions(vtkSlangTestCompiler
-  PRIVATE VTKSLANG_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+  PRIVATE VTKSLANG_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+          VTKSLANG_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 add_test(NAME vtkSlang.Compiler COMMAND vtkSlangTestCompiler)
 
