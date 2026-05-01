@@ -72,7 +72,7 @@ configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vtkSlangVersion.h.in"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangVersion.h"
   @ONLY)
-foreach(_header IN ITEMS vtkSlang.h vtkSlangCompiler.h)
+foreach(_header IN ITEMS vtkSlang.h vtkSlangCompiler.h vtkSlangWebGPU.h)
   configure_file("${CMAKE_CURRENT_SOURCE_DIR}/${_header}" "${_PUBLIC_INCLUDE_DIR}/${_header}"
     COPYONLY)
 endforeach()
@@ -130,6 +130,7 @@ install(TARGETS vtkSlang
 install(FILES
   "${_PUBLIC_INCLUDE_DIR}/vtkSlang.h"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangCompiler.h"
+  "${_PUBLIC_INCLUDE_DIR}/vtkSlangWebGPU.h"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangVersion.h"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangExport.h"
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vtkSlang)
