@@ -64,6 +64,84 @@ slang::IGlobalSession* globalSession()
   return session;
 }
 
+BindingKind bindingKind(slang::TypeLayoutReflection* type)
+{
+  switch (type->getKind()) {
+  case slang::TypeReflection::Kind::ConstantBuffer:
+    return BindingKind::UniformBuffer;
+  case slang::TypeReflection::Kind::SamplerState:
+    return BindingKind::Sampler;
+  case slang::TypeReflection::Kind::Resource: {
+    const unsigned shape    = type->getResourceShape() & SLANG_RESOURCE_BASE_SHAPE_MASK;
+    const bool     readOnly = type->getResourceAccess() == SLANG_RESOURCE_ACCESS_READ;
+    switch (shape) {
+    case SLANG_STRUCTURED_BUFFER:
+    case SLANG_BYTE_ADDRESS_BUFFER:
+      return readOnly ? BindingKind::ReadOnlyStorageBuffer : BindingKind::StorageBuffer;
+    case SLANG_TEXTURE_1D:
+    case SLANG_TEXTURE_2D:
+    case SLANG_TEXTURE_3D:
+    case SLANG_TEXTURE_CUBE:
+      return readOnly ? BindingKind::SampledTexture : BindingKind::StorageTexture;
+    default:
+      return BindingKind::Other;
+    }
+  }
+  default:
+    return BindingKind::Other;
+  }
+}
+
+void reflectParameter(slang::VariableLayoutReflection* param, std::vector<ReflectedBinding>& out)
+{
+  slang::TypeLayoutReflection* type = param->getTypeLayout();
+  if (type->getSize(SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT) == 0)
+    return;
+
+  ReflectedBinding b;
+  b.name = param->getName() ? param->getName() : "";
+  b.group =
+    static_cast<uint32_t>(param->getBindingSpace(SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT));
+  b.binding =
+    static_cast<uint32_t>(param->getOffset(SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT));
+  b.kind = bindingKind(type);
+  if (b.kind == BindingKind::UniformBuffer)
+    b.sizeBytes = type->getElementTypeLayout()->getSize(SLANG_PARAMETER_CATEGORY_UNIFORM);
+  out.push_back(std::move(b));
+}
+
+std::vector<ReflectedBinding> reflectBindings(slang::IComponentType* linked, SlangInt entryCount)
+{
+  std::vector<ReflectedBinding> bindings;
+  slang::ProgramLayout* layout = linked->getLayout(0);
+  if (!layout)
+    return bindings;
+
+  for (unsigned i = 0; i < layout->getParameterCount(); ++i)
+    reflectParameter(layout->getParameterByIndex(i), bindings);
+  for (SlangUInt e = 0; e < layout->getEntryPointCount(); ++e) {
+    slang::EntryPointReflection* ep = layout->getEntryPointByIndex(e);
+    for (unsigned i = 0; i < ep->getParameterCount(); ++i)
+      reflectParameter(ep->getParameterByIndex(i), bindings);
+  }
+
+  for (ReflectedBinding& b : bindings) {
+    bool usedAnywhere = false;
+    for (SlangInt e = 0; e < entryCount && !usedAnywhere; ++e) {
+      Slang::ComPtr<slang::IMetadata> metadata;
+      bool used = false;
+      if (SLANG_SUCCEEDED(linked->getEntryPointMetadata(e, 0, metadata.writeRef())) &&
+        SLANG_SUCCEEDED(metadata->isParameterLocationUsed(
+          SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT, b.group, b.binding, used)))
+        usedAnywhere = used;
+      else
+        usedAnywhere = true;
+    }
+    b.used = usedAnywhere;
+  }
+  return bindings;
+}
+
 uint64_t fnv1a(std::string_view s)
 {
   uint64_t h = 1469598103934665603ull;
@@ -294,6 +372,7 @@ struct vtkSlangCompiler::SlangState
     Artifact a;
     a.target      = target;
     a.source      = ArtifactSource::Slang;
+    a.bindings    = reflectBindings(linked, static_cast<SlangInt>(eps.size()));
     a.diagnostics = std::move(diagnostics);
     const char* data = static_cast<const char*>(code->getBufferPointer());
     if (target == Target::WGSL) {
@@ -377,8 +456,8 @@ Artifact vtkSlangCompiler::compileText(const std::string& source,
 
 Artifact vtkSlangCompiler::compileProgram(const Program& program, const CompileOptions& options)
 {
-  const bool plain =
-    options.defines.empty() && options.searchPaths.empty() && options.modules.empty();
+  const bool plain = options.defines.empty() && options.searchPaths.empty() && !options.reflect &&
+    options.modules.empty();
   if (plain) {
     for (const Artifact& precompiled : program.precompiled) {
       const bool present = precompiled.target == Target::WGSL ? !precompiled.wgsl.empty()

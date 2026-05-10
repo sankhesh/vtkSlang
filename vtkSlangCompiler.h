@@ -26,13 +26,35 @@ enum class ArtifactSource
   Precompiled,
 };
 
+enum class BindingKind
+{
+  UniformBuffer,
+  ReadOnlyStorageBuffer,
+  StorageBuffer,
+  SampledTexture,
+  StorageTexture,
+  Sampler,
+  Other,
+};
+
+struct ReflectedBinding
+{
+  std::string name;
+  uint32_t    group   = 0;
+  uint32_t    binding = 0;
+  BindingKind kind    = BindingKind::Other;
+  bool        used    = true;
+  uint64_t    sizeBytes = 0;
+};
+
 struct Artifact
 {
-  Target                target = Target::WGSL;
-  ArtifactSource        source = ArtifactSource::None;
-  std::string           wgsl;
-  std::vector<uint32_t> spirv;
-  std::string           diagnostics;
+  Target                        target = Target::WGSL;
+  ArtifactSource                source = ArtifactSource::None;
+  std::string                   wgsl;
+  std::vector<uint32_t>         spirv;
+  std::vector<ReflectedBinding> bindings;
+  std::string                   diagnostics;
 
   explicit operator bool() const { return source != ArtifactSource::None; }
 };
@@ -44,6 +66,8 @@ struct CompileOptions
   std::vector<std::pair<std::string, std::string>> defines;
 
   std::vector<std::string> searchPaths;
+
+  bool reflect = false;
 
   std::vector<std::string> modules;
 };
