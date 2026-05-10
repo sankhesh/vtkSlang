@@ -111,6 +111,65 @@ void run(uint3 id : SV_DispatchThreadID) { data[id.x] = triple(data[id.x]); }
     "search paths resolve imports");
 }
 
+const vtkslang::ReflectedBinding* findBinding(const vtkslang::Artifact& a, uint32_t binding)
+{
+  for (const auto& b : a.bindings)
+    if (b.group == 0 && b.binding == binding)
+      return &b;
+  return nullptr;
+}
+
+void testReflection(vtkslang::vtkSlangCompiler& compiler)
+{
+  using vtkslang::BindingKind;
+  vtkslang::CompileOptions reflect;
+  reflect.reflect = true;
+
+  vtkslang::Artifact host = compiler.compileProgram(surfaceHost(), reflect);
+  check(host && host.source == vtkslang::ArtifactSource::Slang && host.bindings.size() == 3,
+    "the host reflects 3 bindings");
+  const BindingKind expected[3] = { BindingKind::UniformBuffer, BindingKind::SampledTexture,
+    BindingKind::Sampler };
+  const char* names[3] = { "scene", "colorTexture", "colorSampler" };
+  bool kindsOk = true;
+  for (uint32_t i = 0; i < 3; ++i) {
+    const auto* b = findBinding(host, i);
+    kindsOk = kindsOk && b && b->kind == expected[i] && b->used && b->name == names[i];
+  }
+  check(kindsOk, "binding kinds and names are reflected");
+  const auto* scene = findBinding(host, 0);
+  check(scene && scene->sizeBytes == 96, "the host's uniform block is 96 bytes");
+
+  const char* partlyUsed = R"(
+[vk::binding(0, 0)] RWStructuredBuffer<float> written;
+[vk::binding(1, 0)] StructuredBuffer<float>   ignored;
+[vk::binding(0, 1)] Texture2D                 tex;
+[vk::binding(1, 1)] SamplerState              samp;
+[shader("compute")] [numthreads(64, 1, 1)]
+void run(uint3 id : SV_DispatchThreadID)
+{
+  written[id.x] = tex.SampleLevel(samp, float2(0.5f, 0.5f), 0.f).r;
+}
+)";
+  vtkslang::Artifact p = compiler.compileSource(partlyUsed);
+  const vtkslang::ReflectedBinding* ignored = nullptr;
+  const vtkslang::ReflectedBinding* tex     = nullptr;
+  const vtkslang::ReflectedBinding* samp    = nullptr;
+  for (const auto& b : p.bindings) {
+    if (b.name == "ignored") ignored = &b;
+    if (b.name == "tex") tex = &b;
+    if (b.name == "samp") samp = &b;
+  }
+  check(ignored && !ignored->used, "unreferenced binding is reported unused");
+  check(tex && tex->group == 1 && tex->binding == 0 && tex->kind == BindingKind::SampledTexture &&
+      tex->used,
+    "texture binding: group, slot, kind");
+  check(samp && samp->kind == BindingKind::Sampler, "sampler binding kind");
+
+  check(compiler.compileProgram(surfaceHost()).bindings.empty(),
+    "precompiled artifacts carry no reflection unless asked");
+}
+
 void testProgramWithoutSlang(vtkslang::vtkSlangCompiler& compiler)
 {
   const vtkslang::Program p = surfaceHost();
@@ -128,6 +187,14 @@ void testProgram(vtkslang::vtkSlangCompiler& compiler)
   vtkslang::Artifact s = compiler.compileProgram(p, spirv);
   check(s && s.source == vtkslang::ArtifactSource::Slang && !s.spirv.empty(),
     "a target without a precompiled artifact compiles with Slang");
+
+  vtkslang::CompileOptions reflect;
+  reflect.reflect      = true;
+  vtkslang::Artifact r = compiler.compileProgram(p, reflect);
+  check(r && r.source == vtkslang::ArtifactSource::Slang &&
+      r.wgsl.find("fn fragmentMain") != std::string::npos &&
+      r.wgsl.find("fn vertexMain") != std::string::npos,
+    "a reflected program request compiles with Slang");
 
   vtkslang::CompileOptions defined;
   defined.defines      = { { "UNUSED", "1" } };
@@ -204,6 +271,7 @@ int main()
     testSlang(compiler);
     testOptions(compiler);
     testModules(compiler);
+    testReflection(compiler);
   } else {
     std::printf("SKIP: Slang unavailable\n");
   }
