@@ -55,6 +55,7 @@ struct Artifact
   std::vector<uint32_t>         spirv;
   std::vector<ReflectedBinding> bindings;
   std::string                   diagnostics;
+  bool fromCache = false;
 
   explicit operator bool() const { return source != ArtifactSource::None; }
 };
@@ -100,6 +101,8 @@ public:
                          const CompileOptions& options = {});
 
   Artifact compileProgram(const Program& program, const CompileOptions& options = {});
+
+  void setCacheDirectory(const std::string& directory);
 
 private:
   Artifact compileText(const std::string& source, const std::vector<std::string>& programModules,

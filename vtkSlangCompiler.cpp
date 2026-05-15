@@ -4,7 +4,11 @@
 #include "vtkSlangCompiler.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
+#include <sstream>
 #include <string_view>
 #include <unordered_map>
 
@@ -18,7 +22,11 @@
 #    define SLANG_TAG_VERSION "unknown"
 #  endif
 
+#  include <cstring>
+#  include <filesystem>
+#  include <fstream>
 #  include <regex>
+#  include <sstream>
 #endif
 
 #include "vtkSlangSources.h"
@@ -152,6 +160,122 @@ uint64_t fnv1a(std::string_view s)
   return h;
 }
 
+const std::string& libraryHash()
+{
+  static const std::string hash = [] {
+    std::string all;
+    for (const char* name : kLibraryModules) {
+      all += name;
+      all += '\0';
+      all += vtkSlangSources::get(name);
+    }
+    std::ostringstream ss;
+    ss << std::hex << fnv1a(all);
+    return ss.str();
+  }();
+  return hash;
+}
+
+void putU64(std::string& out, uint64_t v)
+{
+  out.append(reinterpret_cast<const char*>(&v), sizeof v);
+}
+
+void putStr(std::string& out, std::string_view s)
+{
+  putU64(out, s.size());
+  out.append(s.data(), s.size());
+}
+
+struct Reader
+{
+  const std::string& data;
+  size_t             pos = 0;
+  bool               ok  = true;
+
+  uint64_t u64()
+  {
+    uint64_t v = 0;
+    if (pos + sizeof v > data.size()) {
+      ok = false;
+      return 0;
+    }
+    std::memcpy(&v, data.data() + pos, sizeof v);
+    pos += sizeof v;
+    return v;
+  }
+
+  std::string str()
+  {
+    uint64_t n = u64();
+    if (!ok || n > data.size() - pos) {
+      ok = false;
+      return {};
+    }
+    std::string s = data.substr(pos, n);
+    pos += n;
+    return s;
+  }
+};
+
+constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-1\n";
+
+std::string serialize(const std::string& key, const Artifact& a)
+{
+  std::string out(kCacheMagic);
+  putStr(out, key);
+  putU64(out, static_cast<uint64_t>(a.target));
+  if (a.target == Target::WGSL)
+    putStr(out, a.wgsl);
+  else
+    putStr(out, std::string_view(reinterpret_cast<const char*>(a.spirv.data()),
+                  a.spirv.size() * sizeof(uint32_t)));
+  putU64(out, a.bindings.size());
+  for (const ReflectedBinding& b : a.bindings) {
+    putStr(out, b.name);
+    putU64(out, b.group);
+    putU64(out, b.binding);
+    putU64(out, static_cast<uint64_t>(b.kind));
+    putU64(out, b.used ? 1 : 0);
+    putU64(out, b.sizeBytes);
+  }
+  putStr(out, a.diagnostics);
+  return out;
+}
+
+bool deserialize(const std::string& data, const std::string& key, Artifact& a)
+{
+  if (data.compare(0, kCacheMagic.size(), kCacheMagic) != 0)
+    return false;
+  Reader r{ data, kCacheMagic.size() };
+  if (r.str() != key || !r.ok)
+    return false;
+  a.target         = static_cast<Target>(r.u64());
+  std::string code = r.str();
+  if (a.target == Target::WGSL) {
+    a.wgsl = std::move(code);
+  } else {
+    if (code.size() % sizeof(uint32_t) != 0)
+      return false;
+    a.spirv.resize(code.size() / sizeof(uint32_t));
+    std::memcpy(a.spirv.data(), code.data(), code.size());
+  }
+  uint64_t count = r.u64();
+  for (uint64_t i = 0; r.ok && i < count; ++i) {
+    ReflectedBinding b;
+    b.name      = r.str();
+    b.group     = static_cast<uint32_t>(r.u64());
+    b.binding   = static_cast<uint32_t>(r.u64());
+    b.kind      = static_cast<BindingKind>(r.u64());
+    b.used      = r.u64() != 0;
+    b.sizeBytes = r.u64();
+    a.bindings.push_back(std::move(b));
+  }
+  a.diagnostics = r.str();
+  a.source      = ArtifactSource::Slang;
+  return r.ok && r.pos == data.size();
+}
+
 void appendDiagnostics(std::string& out, slang::IBlob* blob)
 {
   if (blob && blob->getBufferSize() > 0) {
@@ -226,6 +350,84 @@ struct vtkSlangCompiler::SlangState
   std::mutex mutex;
   std::unordered_map<std::string, TargetSession> sessions;
   unsigned userModuleCount = 0;
+
+  std::string                               cacheDirectory;
+  std::unordered_map<std::string, Artifact> memoryCache;
+
+  static std::string cacheKey(const std::string& what, const std::string& source,
+                              const std::vector<std::string>& entryPoints,
+                              const CompileOptions& options)
+  {
+    if (!options.searchPaths.empty())
+      return {};
+    std::string key = sessionKey(options);
+    key += "\nreflect=" + std::to_string(options.reflect ? 1 : 0);
+    key += std::string("\nslang=") + SLANG_TAG_VERSION;
+    key += "\nlibrary=" + libraryHash();
+    for (const std::string& e : entryPoints)
+      key += "\nentry=" + e;
+    for (const std::string& m : options.modules)
+      key += "\nmodule=" + std::to_string(m.size()) + ":" + m;
+    key += "\n" + what + "\n" + source;
+    return key;
+  }
+
+  std::filesystem::path cachePath(const std::string& key) const
+  {
+    std::ostringstream name;
+    name << std::hex << fnv1a(key) << ".vtkslangcache";
+    return std::filesystem::path(cacheDirectory) / name.str();
+  }
+
+  bool lookup(const std::string& key, Artifact& out)
+  {
+    if (key.empty())
+      return false;
+    auto it = memoryCache.find(key);
+    if (it != memoryCache.end()) {
+      out           = it->second;
+      out.fromCache = true;
+      return true;
+    }
+    if (cacheDirectory.empty())
+      return false;
+    std::ifstream in(cachePath(key), std::ios::binary);
+    if (!in)
+      return false;
+    std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    Artifact a;
+    if (!deserialize(data, key, a))
+      return false;
+    memoryCache[key] = a;
+    out              = std::move(a);
+    out.fromCache    = true;
+    return true;
+  }
+
+  void store(const std::string& key, const Artifact& a)
+  {
+    if (key.empty() || !a)
+      return;
+    memoryCache[key] = a;
+    if (cacheDirectory.empty())
+      return;
+    std::error_code       ec;
+    std::filesystem::path path = cachePath(key);
+    std::filesystem::path tmp  = path;
+    tmp += ".tmp" + std::to_string(fnv1a(std::to_string(reinterpret_cast<uintptr_t>(this))));
+    {
+      std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+      if (!out)
+        return;
+      std::string data = serialize(key, a);
+      out.write(data.data(), static_cast<std::streamsize>(data.size()));
+      if (!out)
+        return;
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec)
+      std::filesystem::remove(tmp, ec);
+  }
 
   static std::string sessionKey(const CompileOptions& options)
   {
@@ -433,6 +635,11 @@ Artifact vtkSlangCompiler::compileText(const std::string& source,
   merged.modules.insert(merged.modules.begin(), programModules.begin(), programModules.end());
 
   std::lock_guard<std::mutex> lock(m_slang->mutex);
+  const std::string key = SlangState::cacheKey("source", source, entryPoints, merged);
+  Artifact cached;
+  if (m_slang->lookup(key, cached))
+    return cached;
+
   std::string diagnostics;
   auto* ts = m_slang->session(merged, diagnostics);
   if (!ts)
@@ -445,7 +652,10 @@ Artifact vtkSlangCompiler::compileText(const std::string& source,
   slang::IModule* module = m_slang->loadSource(*ts, name, source.c_str(), diagnostics);
   if (!module)
     return failure(merged.target, diagnostics);
-  return m_slang->compile(*ts, merged, module, extra, entryPoints, std::move(diagnostics));
+  Artifact a =
+    m_slang->compile(*ts, merged, module, extra, entryPoints, std::move(diagnostics));
+  m_slang->store(key, a);
+  return a;
 #else
   (void)source;
   (void)programModules;
@@ -470,6 +680,20 @@ Artifact vtkSlangCompiler::compileProgram(const Program& program, const CompileO
     }
   }
   return compileText(program.source, program.modules, program.entryPoints, options);
+}
+
+void vtkSlangCompiler::setCacheDirectory(const std::string& directory)
+{
+#ifdef VTKSLANG_USE_SLANG
+  std::lock_guard<std::mutex> lock(m_slang->mutex);
+  m_slang->cacheDirectory = directory;
+  if (!directory.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+  }
+#else
+  (void)directory;
+#endif
 }
 
 }
