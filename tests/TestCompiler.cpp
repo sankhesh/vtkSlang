@@ -171,6 +171,79 @@ void run(uint3 id : SV_DispatchThreadID)
     "precompiled artifacts carry no reflection unless asked");
 }
 
+void testCache()
+{
+  const char* src = R"(
+[vk::binding(0, 0)] RWStructuredBuffer<float> data;
+[shader("compute")] [numthreads(64, 1, 1)]
+void cached(uint3 id : SV_DispatchThreadID) { data[id.x] = data[id.x] + 1.f; }
+)";
+  {
+    vtkslang::vtkSlangCompiler c;
+    vtkslang::Artifact first  = c.compileSource(src);
+    vtkslang::Artifact second = c.compileSource(src);
+    check(first && !first.fromCache && second.fromCache && second.wgsl == first.wgsl &&
+        second.bindings.size() == first.bindings.size(),
+      "repeat compile is served from the memory cache");
+  }
+
+  const std::string dir = std::string(VTKSLANG_TEST_TMP_DIR) + "/cache";
+  std::error_code   ec;
+  std::filesystem::remove_all(dir, ec);
+
+  std::string firstWGSL;
+  {
+    vtkslang::vtkSlangCompiler a;
+    a.setCacheDirectory(dir);
+    vtkslang::Artifact r = a.compileSource(src);
+    firstWGSL            = r.wgsl;
+    check(r && !r.fromCache, "first compile with a disk cache misses");
+  }
+  size_t entries = 0;
+  std::filesystem::path entry;
+  for (const auto& f : std::filesystem::directory_iterator(dir)) {
+    ++entries;
+    entry = f.path();
+  }
+  check(entries == 1, "one cache entry written");
+
+  {
+    vtkslang::vtkSlangCompiler b;
+    b.setCacheDirectory(dir);
+    vtkslang::Artifact r = b.compileSource(src);
+    check(r && r.fromCache && r.wgsl == firstWGSL, "a new compiler reuses the disk cache");
+
+    vtkslang::CompileOptions other;
+    other.defines = { { "SOMETHING", "1" } };
+    check(!b.compileSource(src, {}, other).fromCache, "different defines miss the cache");
+
+    vtkslang::CompileOptions reflect;
+    reflect.reflect = true;
+    b.compileProgram(surfaceHost(), reflect);
+    vtkslang::Artifact again = b.compileProgram(surfaceHost(), reflect);
+    check(again.fromCache && !again.bindings.empty(), "reflected programs are cached with bindings");
+  }
+
+  {
+    std::ofstream(entry, std::ios::binary | std::ios::trunc) << "not a cache entry";
+    vtkslang::vtkSlangCompiler c;
+    c.setCacheDirectory(dir);
+    vtkslang::Artifact r = c.compileSource(src);
+    check(r && !r.fromCache && r.wgsl == firstWGSL, "a corrupt entry is ignored and recompiled");
+    vtkslang::vtkSlangCompiler d;
+    d.setCacheDirectory(dir);
+    check(d.compileSource(src).fromCache, "the recompiled entry replaces the corrupt one");
+  }
+
+  {
+    vtkslang::vtkSlangCompiler c;
+    vtkslang::CompileOptions withPath;
+    withPath.searchPaths = { VTKSLANG_TEST_TMP_DIR };
+    c.compileSource(src, {}, withPath);
+    check(!c.compileSource(src, {}, withPath).fromCache, "compiles with search paths are not cached");
+  }
+}
+
 void testProgramWithoutSlang(vtkslang::vtkSlangCompiler& compiler)
 {
   const vtkslang::Program p = surfaceHost();
@@ -273,6 +346,7 @@ int main()
     testOptions(compiler);
     testModules(compiler);
     testReflection(compiler);
+    testCache();
   } else {
     std::printf("SKIP: Slang unavailable\n");
   }
