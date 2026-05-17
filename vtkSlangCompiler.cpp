@@ -100,21 +100,101 @@ BindingKind bindingKind(slang::TypeLayoutReflection* type)
   }
 }
 
-void reflectParameter(slang::VariableLayoutReflection* param, std::vector<ReflectedBinding>& out)
-{
-  slang::TypeLayoutReflection* type = param->getTypeLayout();
-  if (type->getSize(SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT) == 0)
-    return;
+constexpr SlangParameterCategory kSlot     = SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT;
+constexpr SlangParameterCategory kUniform  = SLANG_PARAMETER_CATEGORY_UNIFORM;
+constexpr SlangParameterCategory kSubSpace = SLANG_PARAMETER_CATEGORY_SUB_ELEMENT_REGISTER_SPACE;
 
+std::string joinPath(const std::string& prefix, slang::VariableLayoutReflection* v)
+{
+  const char* name = v->getName();
+  if (!name || !*name)
+    return prefix;
+  return prefix.empty() ? std::string(name) : prefix + "." + name;
+}
+
+void collectUniformFields(slang::VariableLayoutReflection* v, uint64_t base,
+                          const std::string& prefix, std::vector<UniformField>& out)
+{
+  slang::TypeLayoutReflection* type = v->getTypeLayout();
+  const uint64_t size = type->getSize(kUniform);
+  if (size == 0)
+    return;
+  const uint64_t    offset = base + v->getOffset(kUniform);
+  const std::string name   = joinPath(prefix, v);
+  if (type->getKind() == slang::TypeReflection::Kind::Struct) {
+    for (unsigned i = 0; i < type->getFieldCount(); ++i)
+      collectUniformFields(type->getFieldByIndex(i), offset, name, out);
+    return;
+  }
+  UniformField field;
+  field.name   = name;
+  field.offset = offset;
+  field.size   = size;
+  out.push_back(std::move(field));
+}
+
+void walkParameter(slang::VariableLayoutReflection* v, uint32_t space, uint32_t slot,
+                   const std::string& prefix, std::vector<ReflectedBinding>& out);
+
+void walkBlock(slang::TypeLayoutReflection* type, const std::string& name, uint32_t space,
+               uint32_t slot, std::vector<ReflectedBinding>& out)
+{
+  slang::VariableLayoutReflection* container = type->getContainerVarLayout();
+  slang::VariableLayoutReflection* element   = type->getElementVarLayout();
+  slang::TypeLayoutReflection*     data      = element->getTypeLayout();
+
+  const uint64_t size = data->getSize(kUniform);
+  if (size > 0) {
+    ReflectedBinding b;
+    b.name      = name;
+    b.group     = space;
+    b.binding   = slot + static_cast<uint32_t>(container->getOffset(kSlot));
+    b.kind      = BindingKind::UniformBuffer;
+    b.sizeBytes = size;
+    if (data->getKind() == slang::TypeReflection::Kind::Struct) {
+      for (unsigned i = 0; i < data->getFieldCount(); ++i)
+        collectUniformFields(data->getFieldByIndex(i), 0, "", b.fields);
+    }
+    out.push_back(std::move(b));
+  }
+
+  const uint32_t resourceBase = slot + static_cast<uint32_t>(element->getOffset(kSlot));
+  if (data->getKind() == slang::TypeReflection::Kind::Struct) {
+    for (unsigned i = 0; i < data->getFieldCount(); ++i)
+      walkParameter(data->getFieldByIndex(i), space, resourceBase, name, out);
+  }
+}
+
+void walkParameter(slang::VariableLayoutReflection* v, uint32_t space, uint32_t slot,
+                   const std::string& prefix, std::vector<ReflectedBinding>& out)
+{
+  slang::TypeLayoutReflection* type  = v->getTypeLayout();
+  const std::string            name  = joinPath(prefix, v);
+  const uint32_t               group = space + static_cast<uint32_t>(v->getBindingSpace(kSlot));
+  const uint32_t               here  = slot + static_cast<uint32_t>(v->getOffset(kSlot));
+
+  switch (type->getKind()) {
+  case slang::TypeReflection::Kind::ParameterBlock:
+    walkBlock(type, name, space + static_cast<uint32_t>(v->getOffset(kSubSpace)), 0, out);
+    return;
+  case slang::TypeReflection::Kind::ConstantBuffer:
+    walkBlock(type, name, group, here, out);
+    return;
+  case slang::TypeReflection::Kind::Struct:
+    for (unsigned i = 0; i < type->getFieldCount(); ++i)
+      walkParameter(type->getFieldByIndex(i), group, here, name, out);
+    return;
+  default:
+    break;
+  }
+
+  if (type->getSize(kSlot) == 0)
+    return;
   ReflectedBinding b;
-  b.name = param->getName() ? param->getName() : "";
-  b.group =
-    static_cast<uint32_t>(param->getBindingSpace(SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT));
-  b.binding =
-    static_cast<uint32_t>(param->getOffset(SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT));
-  b.kind = bindingKind(type);
-  if (b.kind == BindingKind::UniformBuffer)
-    b.sizeBytes = type->getElementTypeLayout()->getSize(SLANG_PARAMETER_CATEGORY_UNIFORM);
+  b.name    = name;
+  b.group   = group;
+  b.binding = here;
+  b.kind    = bindingKind(type);
   out.push_back(std::move(b));
 }
 
@@ -126,11 +206,11 @@ std::vector<ReflectedBinding> reflectBindings(slang::IComponentType* linked, Sla
     return bindings;
 
   for (unsigned i = 0; i < layout->getParameterCount(); ++i)
-    reflectParameter(layout->getParameterByIndex(i), bindings);
+    walkParameter(layout->getParameterByIndex(i), 0, 0, "", bindings);
   for (SlangUInt e = 0; e < layout->getEntryPointCount(); ++e) {
     slang::EntryPointReflection* ep = layout->getEntryPointByIndex(e);
     for (unsigned i = 0; i < ep->getParameterCount(); ++i)
-      reflectParameter(ep->getParameterByIndex(i), bindings);
+      walkParameter(ep->getParameterByIndex(i), 0, 0, "", bindings);
   }
 
   for (ReflectedBinding& b : bindings) {
@@ -218,7 +298,7 @@ struct Reader
   }
 };
 
-constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-1\n";
+constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-2\n";
 
 std::string serialize(const std::string& key, const Artifact& a)
 {
@@ -238,6 +318,12 @@ std::string serialize(const std::string& key, const Artifact& a)
     putU64(out, static_cast<uint64_t>(b.kind));
     putU64(out, b.used ? 1 : 0);
     putU64(out, b.sizeBytes);
+    putU64(out, b.fields.size());
+    for (const UniformField& f : b.fields) {
+      putStr(out, f.name);
+      putU64(out, f.offset);
+      putU64(out, f.size);
+    }
   }
   putStr(out, a.diagnostics);
   return out;
@@ -269,6 +355,14 @@ bool deserialize(const std::string& data, const std::string& key, Artifact& a)
     b.kind      = static_cast<BindingKind>(r.u64());
     b.used      = r.u64() != 0;
     b.sizeBytes = r.u64();
+    uint64_t fieldCount = r.u64();
+    for (uint64_t j = 0; r.ok && j < fieldCount; ++j) {
+      UniformField f;
+      f.name   = r.str();
+      f.offset = r.u64();
+      f.size   = r.u64();
+      b.fields.push_back(std::move(f));
+    }
     a.bindings.push_back(std::move(b));
   }
   a.diagnostics = r.str();

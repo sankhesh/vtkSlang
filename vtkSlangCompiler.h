@@ -37,6 +37,13 @@ enum class BindingKind
   Other,
 };
 
+struct UniformField
+{
+  std::string name;
+  uint64_t    offset = 0;
+  uint64_t    size   = 0;
+};
+
 struct ReflectedBinding
 {
   std::string name;
@@ -45,6 +52,7 @@ struct ReflectedBinding
   BindingKind kind    = BindingKind::Other;
   bool        used    = true;
   uint64_t    sizeBytes = 0;
+  std::vector<UniformField> fields;
 };
 
 struct Artifact
