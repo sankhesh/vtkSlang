@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -139,7 +141,9 @@ void testReflection(vtkslang::vtkSlangCompiler& compiler)
   }
   check(kindsOk, "binding kinds and names are reflected");
   const auto* scene = findBinding(host, 0);
-  check(scene && scene->sizeBytes == 96, "the host's uniform block is 96 bytes");
+  check(scene && scene->sizeBytes == 96 && scene->fields.size() == 3 &&
+      scene->fields[1].name == "lightDirection" && scene->fields[1].offset == 64,
+    "the host's uniform block is 96 bytes with its fields");
 
   const char* partlyUsed = R"(
 [vk::binding(0, 0)] RWStructuredBuffer<float> written;
@@ -169,6 +173,101 @@ void run(uint3 id : SV_DispatchThreadID)
 
   check(compiler.compileProgram(surfaceHost()).bindings.empty(),
     "precompiled artifacts carry no reflection unless asked");
+}
+
+std::set<std::string> wgslBindings(const std::string& wgsl)
+{
+  std::set<std::string> out;
+  std::regex decl(R"(@binding\((\d+)\) @group\((\d+)\) var(<[^>]*>)? \w+ : ([\w_]+))");
+  for (std::sregex_iterator it(wgsl.begin(), wgsl.end(), decl), end; it != end; ++it) {
+    const std::string access = (*it)[3];
+    const std::string type   = (*it)[4];
+    std::string kind = "other";
+    if (access == "<uniform>") kind = "uniform";
+    else if (access == "<storage, read>") kind = "ro-storage";
+    else if (access == "<storage, read_write>") kind = "storage";
+    else if (type.rfind("texture_storage", 0) == 0) kind = "storage-texture";
+    else if (type.rfind("texture", 0) == 0) kind = "texture";
+    else if (type.rfind("sampler", 0) == 0) kind = "sampler";
+    out.insert((*it)[2].str() + ":" + (*it)[1].str() + ":" + kind);
+  }
+  return out;
+}
+
+std::set<std::string> reflectedBindings(const vtkslang::Artifact& a)
+{
+  using vtkslang::BindingKind;
+  std::set<std::string> out;
+  for (const auto& b : a.bindings) {
+    if (!b.used)
+      continue;
+    const char* kind = "other";
+    switch (b.kind) {
+      case BindingKind::UniformBuffer: kind = "uniform"; break;
+      case BindingKind::ReadOnlyStorageBuffer: kind = "ro-storage"; break;
+      case BindingKind::StorageBuffer: kind = "storage"; break;
+      case BindingKind::SampledTexture: kind = "texture"; break;
+      case BindingKind::StorageTexture: kind = "storage-texture"; break;
+      case BindingKind::Sampler: kind = "sampler"; break;
+      default: break;
+    }
+    out.insert(std::to_string(b.group) + ":" + std::to_string(b.binding) + ":" + kind);
+  }
+  return out;
+}
+
+const vtkslang::ReflectedBinding* byName(const vtkslang::Artifact& a, const std::string& name)
+{
+  for (const auto& b : a.bindings)
+    if (b.name == name)
+      return &b;
+  return nullptr;
+}
+
+const vtkslang::UniformField* field(const vtkslang::ReflectedBinding* b, const std::string& name)
+{
+  if (b)
+    for (const auto& f : b->fields)
+      if (f.name == name)
+        return &f;
+  return nullptr;
+}
+
+void testNestedReflection(vtkslang::vtkSlangCompiler& compiler)
+{
+  using vtkslang::BindingKind;
+  const char* nested = R"(
+struct Material { float4 tint; float bands; Texture2D ramp; SamplerState samp; };
+struct Actor { float4x4 model; float4 color; Material material; };
+[vk::binding(0, 0)] RWStructuredBuffer<float4> outColor;
+ParameterBlock<Actor> actor;
+[shader("compute")] [numthreads(64, 1, 1)]
+void run(uint3 id : SV_DispatchThreadID)
+{
+  float q = floor(actor.color.r * actor.material.bands) / actor.material.bands;
+  float4 r = actor.material.ramp.SampleLevel(actor.material.samp, float2(q, 0.5f), 0.f);
+  outColor[id.x] = mul(actor.model, actor.material.tint * r);
+}
+)";
+  vtkslang::Artifact a = compiler.compileSource(nested);
+  const auto* block = byName(a, "actor");
+  const auto* ramp  = byName(a, "actor.material.ramp");
+  const auto* samp  = byName(a, "actor.material.samp");
+  check(block && block->group == 1 && block->binding == 0 && block->kind == BindingKind::UniformBuffer,
+    "ParameterBlock opens group 1 with its uniform buffer at binding 0");
+  check(ramp && ramp->group == 1 && ramp->binding == 1 && ramp->kind == BindingKind::SampledTexture &&
+      samp && samp->group == 1 && samp->binding == 2 && samp->kind == BindingKind::Sampler,
+    "resources nested in the block follow its uniform buffer");
+  const auto* model = field(block, "model");
+  const auto* color = field(block, "color");
+  const auto* tint  = field(block, "material.tint");
+  const auto* bands = field(block, "material.bands");
+  check(model && model->offset == 0 && model->size == 64 && color && color->offset == 64 && tint &&
+      tint->offset == 80 && bands && bands->offset == 96 && bands->size == 4,
+    "uniform fields carry nested paths and byte offsets");
+  check(a && reflectedBindings(a) == wgslBindings(a.wgsl),
+    "nested reflection matches the WGSL declarations exactly");
+
 }
 
 void testCache()
@@ -346,6 +445,7 @@ int main()
     testOptions(compiler);
     testModules(compiler);
     testReflection(compiler);
+    testNestedReflection(compiler);
     testCache();
   } else {
     std::printf("SKIP: Slang unavailable\n");
