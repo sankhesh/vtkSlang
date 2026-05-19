@@ -37,6 +37,17 @@ enum class BindingKind
   Other,
 };
 
+enum class TextureDimension
+{
+  None,
+  D1,
+  D2,
+  D2Array,
+  D3,
+  Cube,
+  CubeArray,
+};
+
 struct UniformField
 {
   std::string name;
@@ -52,6 +63,7 @@ struct ReflectedBinding
   BindingKind kind    = BindingKind::Other;
   bool        used    = true;
   uint64_t    sizeBytes = 0;
+  TextureDimension viewDimension = TextureDimension::None;
   std::vector<UniformField> fields;
 };
 

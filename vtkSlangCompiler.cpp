@@ -100,6 +100,26 @@ BindingKind bindingKind(slang::TypeLayoutReflection* type)
   }
 }
 
+TextureDimension textureDimension(slang::TypeLayoutReflection* type)
+{
+  if (type->getKind() != slang::TypeReflection::Kind::Resource)
+    return TextureDimension::None;
+  const unsigned shape = type->getResourceShape();
+  const bool     array = (shape & SLANG_TEXTURE_ARRAY_FLAG) != 0;
+  switch (shape & SLANG_RESOURCE_BASE_SHAPE_MASK) {
+  case SLANG_TEXTURE_1D:
+    return TextureDimension::D1;
+  case SLANG_TEXTURE_2D:
+    return array ? TextureDimension::D2Array : TextureDimension::D2;
+  case SLANG_TEXTURE_3D:
+    return TextureDimension::D3;
+  case SLANG_TEXTURE_CUBE:
+    return array ? TextureDimension::CubeArray : TextureDimension::Cube;
+  default:
+    return TextureDimension::None;
+  }
+}
+
 constexpr SlangParameterCategory kSlot     = SLANG_PARAMETER_CATEGORY_DESCRIPTOR_TABLE_SLOT;
 constexpr SlangParameterCategory kUniform  = SLANG_PARAMETER_CATEGORY_UNIFORM;
 constexpr SlangParameterCategory kSubSpace = SLANG_PARAMETER_CATEGORY_SUB_ELEMENT_REGISTER_SPACE;
@@ -195,6 +215,7 @@ void walkParameter(slang::VariableLayoutReflection* v, uint32_t space, uint32_t 
   b.group   = group;
   b.binding = here;
   b.kind    = bindingKind(type);
+  b.viewDimension = textureDimension(type);
   out.push_back(std::move(b));
 }
 
@@ -298,7 +319,7 @@ struct Reader
   }
 };
 
-constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-2\n";
+constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-3\n";
 
 std::string serialize(const std::string& key, const Artifact& a)
 {
@@ -318,6 +339,7 @@ std::string serialize(const std::string& key, const Artifact& a)
     putU64(out, static_cast<uint64_t>(b.kind));
     putU64(out, b.used ? 1 : 0);
     putU64(out, b.sizeBytes);
+    putU64(out, static_cast<uint64_t>(b.viewDimension));
     putU64(out, b.fields.size());
     for (const UniformField& f : b.fields) {
       putStr(out, f.name);
@@ -355,6 +377,7 @@ bool deserialize(const std::string& data, const std::string& key, Artifact& a)
     b.kind      = static_cast<BindingKind>(r.u64());
     b.used      = r.u64() != 0;
     b.sizeBytes = r.u64();
+    b.viewDimension = static_cast<TextureDimension>(r.u64());
     uint64_t fieldCount = r.u64();
     for (uint64_t j = 0; r.ok && j < fieldCount; ++j) {
       UniformField f;
