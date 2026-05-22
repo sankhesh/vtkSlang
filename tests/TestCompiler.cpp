@@ -270,6 +270,48 @@ void run(uint3 id : SV_DispatchThreadID)
 
 }
 
+void testTextureDimensions()
+{
+  using vtkslang::TextureDimension;
+  const char* src = R"(
+[vk::binding(0, 0)] Texture1D t1;
+[vk::binding(1, 0)] Texture2D t2;
+[vk::binding(2, 0)] Texture2DArray t2a;
+[vk::binding(3, 0)] Texture3D t3;
+[vk::binding(4, 0)] TextureCube tc;
+[vk::binding(5, 0)] TextureCubeArray tca;
+[vk::binding(6, 0)] SamplerState s;
+[vk::binding(7, 0)] RWStructuredBuffer<float4> outColor;
+[shader("compute")] [numthreads(1, 1, 1)]
+void run(uint3 id : SV_DispatchThreadID)
+{
+  outColor[id.x] = t1.SampleLevel(s, 0.5f, 0.f) + t2.SampleLevel(s, float2(0.5f), 0.f) +
+    t2a.SampleLevel(s, float3(0.5f), 0.f) + t3.SampleLevel(s, float3(0.5f), 0.f) +
+    tc.SampleLevel(s, float3(1.f), 0.f) + tca.SampleLevel(s, float4(1.f), 0.f);
+}
+)";
+  const std::string dir = std::string(VTKSLANG_TEST_TMP_DIR) + "/cache-dimensions";
+  std::error_code   ec;
+  std::filesystem::remove_all(dir, ec);
+  for (int pass = 0; pass < 2; ++pass) {
+    vtkslang::vtkSlangCompiler c;
+    c.setCacheDirectory(dir);
+    vtkslang::Artifact a = c.compileSource(src);
+    auto dim = [&a](const char* name) {
+      const auto* b = byName(a, name);
+      return b ? b->viewDimension : TextureDimension::None;
+    };
+    const bool expected = dim("t1") == TextureDimension::D1 && dim("t2") == TextureDimension::D2 &&
+      dim("t2a") == TextureDimension::D2Array && dim("t3") == TextureDimension::D3 &&
+      dim("tc") == TextureDimension::Cube && dim("tca") == TextureDimension::CubeArray &&
+      dim("s") == TextureDimension::None && dim("outColor") == TextureDimension::None;
+    check(a && a.fromCache == (pass == 1) && expected,
+      pass == 0 ? "textures report their view dimension"
+                : "view dimensions survive the disk cache");
+  }
+  std::filesystem::remove_all(dir, ec);
+}
+
 void testCache()
 {
   const char* src = R"(
@@ -446,6 +488,7 @@ int main()
     testModules(compiler);
     testReflection(compiler);
     testNestedReflection(compiler);
+    testTextureDimensions();
     testCache();
   } else {
     std::printf("SKIP: Slang unavailable\n");
