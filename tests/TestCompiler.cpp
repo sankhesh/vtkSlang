@@ -312,6 +312,127 @@ void run(uint3 id : SV_DispatchThreadID)
   std::filesystem::remove_all(dir, ec);
 }
 
+void testSpecialization(vtkslang::vtkSlangCompiler& compiler)
+{
+  using vtkslang::BindingKind;
+  const char* shading = R"(
+module test_shading;
+public struct Sample { public float4 color; };
+public interface ITestMaterial { float4 shade(Sample s); };
+public interface ITestLight { float scale(); };
+public struct PlainMaterial : ITestMaterial { public float4 shade(Sample s) { return s.color; } };
+public struct UnitLight : ITestLight { public float scale() { return 1.f; } };
+)";
+  const char* shader = R"(
+import test_shading;
+type_param L : ITestLight;
+type_param M : ITestMaterial;
+typealias Default_ITestLight    = UnitLight;
+typealias Default_ITestMaterial = PlainMaterial;
+struct ActorBlock<T : ITestMaterial> { float4 color; T material; };
+[vk::binding(0, 0)] RWStructuredBuffer<float4> outColor;
+ParameterBlock<ActorBlock<M>> actor;
+[shader("compute")] [numthreads(64, 1, 1)]
+void run(uint3 id : SV_DispatchThreadID)
+{
+  Sample s;
+  s.color = actor.color;
+  L light = L();
+  outColor[id.x] = actor.material.shade(s) * light.scale();
+}
+)";
+  const char* toon = R"(
+import test_shading;
+public struct ToonMaterial : ITestMaterial {
+  public float4 tint; public float bands; public Texture2D ramp; public SamplerState samp;
+  public float4 shade(Sample s) {
+    float q = floor(s.color.r * bands) / bands;
+    return tint * ramp.SampleLevel(samp, float2(q, 0.5f), 0.f);
+  }
+};
+)";
+  vtkslang::CompileOptions base;
+  base.modules = { shading };
+
+  vtkslang::Artifact defaults = compiler.compileSource(shader, {}, base);
+  check(defaults && !byName(defaults, "actor.material.ramp") &&
+      reflectedBindings(defaults) == wgslBindings(defaults.wgsl),
+    "type params fall back to the shader's Default_ typealiases");
+  if (!defaults)
+    std::printf("%s", defaults.diagnostics.c_str());
+
+  vtkslang::CompileOptions custom = base;
+  custom.modules.push_back(toon);
+  custom.specializations = { { "ITestMaterial", "ToonMaterial" } };
+  vtkslang::Artifact t = compiler.compileSource(shader, {}, custom);
+  const auto* block = byName(t, "actor");
+  const auto* ramp  = byName(t, "actor.material.ramp");
+  check(t && ramp && ramp->group == 1 && ramp->binding == 1 &&
+      ramp->kind == BindingKind::SampledTexture && field(block, "material.tint") &&
+      field(block, "material.bands") && reflectedBindings(t) == wgslBindings(t.wgsl),
+    "a consumer type specializes one interface; its parameters land in the actor block");
+  if (!t)
+    std::printf("%s", t.diagnostics.c_str());
+  check(t.wgsl != defaults.wgsl, "specialized code differs from the default");
+
+  vtkslang::CompileOptions typo = custom;
+  typo.specializations = { { "ITestMaterail", "ToonMaterial" } };
+  vtkslang::Artifact bad = compiler.compileSource(shader, {}, typo);
+  check(!bad && bad.diagnostics.find("ITestMaterail") != std::string::npos,
+    "naming an interface the shader lacks is an error");
+
+  vtkslang::CompileOptions missing = custom;
+  missing.specializations = { { "ITestMaterial", "NoSuchMaterial" } };
+  check(!compiler.compileSource(shader, {}, missing), "an unknown implementation type fails");
+
+  const char* noDefault = R"(
+import test_shading;
+type_param M : ITestMaterial;
+[vk::binding(0, 0)] RWStructuredBuffer<float4> outColor;
+[shader("compute")] [numthreads(64, 1, 1)]
+void run(uint3 id : SV_DispatchThreadID) { Sample s; s.color = float4(1.f); outColor[id.x] = M().shade(s); }
+)";
+  check(!compiler.compileSource(noDefault, {}, base),
+    "a type param without a default needs an explicit specialization");
+  vtkslang::CompileOptions explicitPlain = base;
+  explicitPlain.specializations = { { "ITestMaterial", "PlainMaterial" } };
+  check(static_cast<bool>(compiler.compileSource(noDefault, {}, explicitPlain)),
+    "...and compiles once given one");
+
+  vtkslang::CompileOptions spec;
+  spec.specializations = { { "IMaterial", "Anything" } };
+  check(!compiler.compileSource(R"([shader("compute")][numthreads(1,1,1)] void m() {})", {}, spec),
+    "specializing a shader without type params is an error");
+
+  const char* shadingV2 = R"(
+module test_shading;
+public struct Sample { public float4 color; };
+public interface ITestMaterial { float4 shade(Sample s); };
+public interface ITestLight { float scale(); };
+public struct PlainMaterial : ITestMaterial { public float4 shade(Sample s) { return s.color.bgra; } };
+public struct UnitLight : ITestLight { public float scale() { return 1.f; } };
+)";
+  vtkslang::CompileOptions edited;
+  edited.modules = { shadingV2 };
+  vtkslang::Artifact v2 = compiler.compileSource(shader, {}, edited);
+  check(v2 && v2.wgsl != defaults.wgsl,
+    "a module redefined with new source is recompiled, not reused");
+  if (!v2 || v2.wgsl == defaults.wgsl)
+    std::printf("v2 ok=%d same=%d\n%s", (int)static_cast<bool>(v2), (int)(v2.wgsl == defaults.wgsl), v2.diagnostics.c_str());
+  check(compiler.compileSource(shader, {}, base).wgsl == defaults.wgsl,
+    "switching back to the original module source works");
+
+  vtkslang::CompileOptions reserved;
+  reserved.modules = { "module vtkslang_core;\npublic float f() { return 1.f; }\n" };
+  vtkslang::Artifact clash = compiler.compileSource(shader, {}, reserved);
+  check(!clash && clash.diagnostics.find("reserved") != std::string::npos,
+    "library module names are reserved");
+
+  vtkslang::Artifact again = compiler.compileSource(shader, {}, custom);
+  check(again.fromCache && again.wgsl == t.wgsl && !compiler.compileSource(shader, {}, base).wgsl.empty(),
+    "specializations are part of the cache key");
+}
+
 void testCache()
 {
   const char* src = R"(
@@ -432,34 +553,6 @@ void main(uint3 id : SV_DispatchThreadID) { data[id.x] = brighten(data[id.x]); }
     "program modules load before user modules, which can import them");
 }
 
-void testModules(vtkslang::vtkSlangCompiler& compiler)
-{
-  const char* user = R"(
-import test_helpers;
-[vk::binding(0, 0)] RWStructuredBuffer<float> data;
-[shader("compute")] [numthreads(64, 1, 1)]
-void run(uint3 id : SV_DispatchThreadID) { data[id.x] = twice(data[id.x]); }
-)";
-  vtkslang::CompileOptions original;
-  original.modules = { "module test_helpers;\npublic float twice(float x) { return 2.f * x; }\n" };
-  vtkslang::Artifact a = compiler.compileSource(user, {}, original);
-  check(a && a.wgsl.find("fn run") != std::string::npos,
-    "a source imports a consumer module by its declared name");
-
-  vtkslang::CompileOptions edited;
-  edited.modules = { "module test_helpers;\npublic float twice(float x) { return 3.f * x; }\n" };
-  vtkslang::Artifact b = compiler.compileSource(user, {}, edited);
-  check(b && b.wgsl != a.wgsl, "a module redefined with new source is recompiled, not reused");
-  check(compiler.compileSource(user, {}, original).wgsl == a.wgsl,
-    "switching back to the original module source works");
-
-  vtkslang::CompileOptions reserved;
-  reserved.modules = { "module vtkslang_core;\npublic float f() { return 1.f; }\n" };
-  vtkslang::Artifact clash = compiler.compileSource(user, {}, reserved);
-  check(!clash && clash.diagnostics.find("reserved") != std::string::npos,
-    "library module names are reserved");
-}
-
 void testDisableEnv(vtkslang::vtkSlangCompiler& compiler)
 {
 #ifdef _WIN32
@@ -485,10 +578,10 @@ int main()
     testProgram(compiler);
     testSlang(compiler);
     testOptions(compiler);
-    testModules(compiler);
     testReflection(compiler);
     testNestedReflection(compiler);
     testTextureDimensions();
+    testSpecialization(compiler);
     testCache();
   } else {
     std::printf("SKIP: Slang unavailable\n");
