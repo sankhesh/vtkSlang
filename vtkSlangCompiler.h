@@ -90,6 +90,8 @@ struct CompileOptions
 
   bool reflect = false;
 
+  std::vector<std::pair<std::string, std::string>> specializations;
+
   std::vector<std::string> modules;
 };
 

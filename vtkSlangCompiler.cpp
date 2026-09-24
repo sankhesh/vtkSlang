@@ -483,6 +483,8 @@ struct vtkSlangCompiler::SlangState
     key += "\nlibrary=" + libraryHash();
     for (const std::string& e : entryPoints)
       key += "\nentry=" + e;
+    for (const auto& s : options.specializations)
+      key += "\nspecialize=" + s.first + "=" + s.second;
     for (const std::string& m : options.modules)
       key += "\nmodule=" + std::to_string(m.size()) + ":" + m;
     key += "\n" + what + "\n" + source;
@@ -636,6 +638,56 @@ struct vtkSlangCompiler::SlangState
     return &ts;
   }
 
+  bool specializationArgs(slang::IComponentType* composite, const CompileOptions& options,
+                          std::vector<std::string>& typeNames, std::string& diagnostics)
+  {
+    const SlangInt count = composite->getSpecializationParamCount();
+    if (count == 0) {
+      if (!options.specializations.empty()) {
+        diagnostics += "vtkSlang: specializations given, but the shader has no type parameters\n";
+        return false;
+      }
+      return true;
+    }
+
+    Slang::ComPtr<slang::IBlob> blob;
+    slang::ProgramLayout*       layout = composite->getLayout(0, blob.writeRef());
+    appendDiagnostics(diagnostics, blob);
+    if (!layout)
+      return false;
+    if (static_cast<SlangInt>(layout->getTypeParameterCount()) != count) {
+      diagnostics += "vtkSlang: generic entry points are not supported; use global type_param\n";
+      return false;
+    }
+
+    std::vector<bool> consumed(options.specializations.size(), false);
+    for (unsigned i = 0; i < layout->getTypeParameterCount(); ++i) {
+      slang::TypeParameterReflection* param = layout->getTypeParameterByIndex(i);
+      if (param->getConstraintCount() != 1) {
+        diagnostics += std::string("vtkSlang: type_param '") + param->getName() +
+          "' must be constrained by exactly one interface\n";
+        return false;
+      }
+      const std::string iface = param->getConstraintByIndex(0)->getName();
+      std::string       chosen = "Default_" + iface;
+      for (size_t s = 0; s < options.specializations.size(); ++s) {
+        if (options.specializations[s].first == iface) {
+          chosen      = options.specializations[s].second;
+          consumed[s] = true;
+        }
+      }
+      typeNames.push_back(chosen);
+    }
+    for (size_t s = 0; s < options.specializations.size(); ++s) {
+      if (!consumed[s]) {
+        diagnostics += "vtkSlang: the shader has no type parameter for interface '" +
+          options.specializations[s].first + "'\n";
+        return false;
+      }
+    }
+    return true;
+  }
+
   Artifact compile(TargetSession& ts, const CompileOptions& options, slang::IModule* module,
                    const std::vector<slang::IModule*>& extra,
                    const std::vector<std::string>& entryPoints, std::string diagnostics)
@@ -673,6 +725,23 @@ struct vtkSlangCompiler::SlangState
     appendDiagnostics(diagnostics, blob);
     if (SLANG_FAILED(r))
       return failure(target, diagnostics);
+
+    std::vector<std::string> typeNames;
+    if (!specializationArgs(composite, options, typeNames, diagnostics))
+      return failure(target, diagnostics);
+    if (!typeNames.empty()) {
+      std::vector<slang::SpecializationArg> args;
+      for (const std::string& t : typeNames)
+        args.push_back(slang::SpecializationArg::fromExpr(t.c_str()));
+      Slang::ComPtr<slang::IComponentType> specialized;
+      blob = nullptr;
+      r    = composite->specialize(
+        args.data(), static_cast<SlangInt>(args.size()), specialized.writeRef(), blob.writeRef());
+      appendDiagnostics(diagnostics, blob);
+      if (SLANG_FAILED(r))
+        return failure(target, diagnostics);
+      composite = specialized;
+    }
 
     Slang::ComPtr<slang::IComponentType> linked;
     blob = nullptr;
@@ -784,7 +853,7 @@ Artifact vtkSlangCompiler::compileText(const std::string& source,
 Artifact vtkSlangCompiler::compileProgram(const Program& program, const CompileOptions& options)
 {
   const bool plain = options.defines.empty() && options.searchPaths.empty() && !options.reflect &&
-    options.modules.empty();
+    options.specializations.empty() && options.modules.empty();
   if (plain) {
     for (const Artifact& precompiled : program.precompiled) {
       const bool present = precompiled.target == Target::WGSL ? !precompiled.wgsl.empty()
