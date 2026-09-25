@@ -49,7 +49,7 @@ Artifact failure(Target target, std::string message)
   return a;
 }
 
-const char* const kLibraryModules[] = { "vtkslang_core" };
+const char* const kLibraryModules[] = { "vtkslang_core", "vtkslang_shading" };
 
 #ifdef VTKSLANG_USE_SLANG
 
