@@ -1,3 +1,10 @@
+import vtkslang_shading;
+
+type_param M : IMaterial;
+type_param L : ILightingModel;
+typealias Default_IMaterial      = HostDrivenMaterial;
+typealias Default_ILightingModel = LambertLighting;
+
 struct Scene
 {
     float4x4 modelToClip;
@@ -5,9 +12,16 @@ struct Scene
     float4   diffuseColor;
 };
 
+struct HostShading<TM : IMaterial, TL : ILightingModel>
+{
+    TM material;
+    TL lighting;
+};
+
 [vk::binding(0, 0)] ConstantBuffer<Scene> scene;
 [vk::binding(1, 0)] Texture2D colorTexture;
 [vk::binding(2, 0)] SamplerState colorSampler;
+[vk::binding(0, 1)] ConstantBuffer<HostShading<M, L>> shading;
 
 struct VertexOutput
 {
@@ -31,7 +45,16 @@ VertexOutput vertexMain(float3 position : POSITION, float3 normal : NORMAL, floa
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target
 {
-    float3 color   = scene.diffuseColor.rgb * colorTexture.Sample(colorSampler, input.uv).rgb;
-    float  diffuse = max(dot(normalize(input.normal), normalize(scene.lightDirection.xyz)), 0.f);
-    return float4(color * (diffuse + 0.1f), scene.diffuseColor.a);
+    SurfaceSample s = SurfaceSample();
+    s.position       = input.positionVC;
+    s.normal         = normalize(input.normal);
+    s.viewDir        = normalize(-input.positionVC);
+    s.uv             = input.uv;
+    s.host.baseColor = scene.diffuseColor.rgb * colorTexture.Sample(colorSampler, input.uv).rgb;
+    s.host.opacity   = scene.diffuseColor.a;
+    MaterialSample m = shading.material.evaluate(s);
+    LightSample l = LightSample();
+    l.direction = normalize(scene.lightDirection.xyz);
+    float3 radiance = shading.lighting.ambient(m, s, float3(0.1f)) + shading.lighting.direct(m, s, l);
+    return float4(shading.lighting.resolve(radiance, m) + m.emissive, m.opacity);
 }

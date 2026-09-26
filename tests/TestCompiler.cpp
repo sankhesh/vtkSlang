@@ -44,6 +44,19 @@ vtkslang::Program surfaceHost()
   return p;
 }
 
+const char* kHostOverrides = R"(
+module host_overrides;
+import vtkslang_shading;
+public struct Tint : IMaterial {
+  float3 tint;
+  public MaterialSample evaluate(SurfaceSample s) {
+    MaterialSample m = HostDrivenMaterial().evaluate(s);
+    m.baseColor *= tint;
+    return m;
+  }
+};
+)";
+
 void testSlang(vtkslang::vtkSlangCompiler& compiler)
 {
   vtkslang::CompileOptions spirv;
@@ -268,6 +281,13 @@ void run(uint3 id : SV_DispatchThreadID)
   check(a && reflectedBindings(a) == wgslBindings(a.wgsl),
     "nested reflection matches the WGSL declarations exactly");
 
+  vtkslang::CompileOptions hosted;
+  hosted.reflect         = true;
+  hosted.modules         = { kHostOverrides };
+  hosted.specializations = { { "IMaterial", "Tint" } };
+  vtkslang::Artifact h   = compiler.compileProgram(surfaceHost(), hosted);
+  check(h && h.bindings.size() == 4 && reflectedBindings(h) == wgslBindings(h.wgsl),
+    "a host program's reflection matches its WGSL declarations exactly");
 }
 
 void testTextureDimensions()
@@ -433,6 +453,64 @@ public struct UnitLight : ITestLight { public float scale() { return 1.f; } };
     "specializations are part of the cache key");
 }
 
+void testOverrides(vtkslang::vtkSlangCompiler& compiler)
+{
+  using vtkslang::BindingKind;
+  const char* stripes = R"(
+module test_stripes;
+import vtkslang_shading;
+public struct StripedMaterial : IMaterial {
+  public float4 stripeColor;
+  public float  frequency;
+  public MaterialSample evaluate(SurfaceSample s) {
+    MaterialSample m = HostDrivenMaterial().evaluate(s);
+    if (frac(s.position.y * frequency) < 0.5f)
+      m.baseColor = stripeColor.rgb;
+    return m;
+  }
+};
+public struct ToonLighting : ILightingModel {
+  public float3 direct(MaterialSample m, SurfaceSample s, LightSample l) {
+    float n = max(dot(s.normal, l.direction), 0.f);
+    return m.baseColor * l.radiance * (n > 0.5f ? 1.f : 0.3f);
+  }
+  public float3 ambient(MaterialSample m, SurfaceSample s, float3 a) { return m.baseColor * a; }
+  public float3 resolve(float3 r, MaterialSample m) { return saturate(r); }
+};
+)";
+  vtkslang::CompileOptions striped;
+  striped.modules         = { stripes };
+  striped.specializations = { { "IMaterial", "StripedMaterial" } };
+  const vtkslang::Program host = surfaceHost();
+  vtkslang::Artifact      r    = compiler.compileProgram(host, striped);
+  const auto* block = byName(r, "shading");
+  check(r && r.source == vtkslang::ArtifactSource::Slang && block && block->group == 1 &&
+      block->kind == BindingKind::UniformBuffer && field(block, "material.stripeColor") &&
+      field(block, "material.frequency") && findBinding(r, 2) &&
+      reflectedBindings(r) == wgslBindings(r.wgsl),
+    "the host takes a consumer IMaterial; its uniforms land in group 1, group 0 is unchanged");
+  if (!r)
+    std::printf("%s", r.diagnostics.c_str());
+
+  size_t group0 = 0;
+  for (const auto& b : r.bindings)
+    group0 += b.group == 0 ? 1 : 0;
+  check(group0 == 3, "the override leaves the host's 3 group-0 bindings intact");
+
+  vtkslang::CompileOptions toon;
+  toon.modules         = { stripes };
+  toon.specializations = { { "ILightingModel", "ToonLighting" } };
+  vtkslang::Artifact p = compiler.compileProgram(host, toon);
+  check(p && p.wgsl != compiler.compileSource(host.source).wgsl && !byName(p, "shading"),
+    "the host takes a consumer ILightingModel; a field-less override adds no bindings");
+  if (!p)
+    std::printf("%s", p.diagnostics.c_str());
+
+  vtkslang::CompileOptions both = toon;
+  both.specializations.push_back({ "IMaterial", "StripedMaterial" });
+  check(static_cast<bool>(compiler.compileProgram(host, both)), "both interfaces at once");
+}
+
 void testCache()
 {
   const char* src = R"(
@@ -532,11 +610,16 @@ void testProgram(vtkslang::vtkSlangCompiler& compiler)
       r.wgsl.find("fn vertexMain") != std::string::npos,
     "a reflected program request compiles with Slang");
 
-  vtkslang::CompileOptions defined;
-  defined.defines      = { { "UNUSED", "1" } };
-  vtkslang::Artifact v = compiler.compileProgram(p, defined);
-  check(v && v.source == vtkslang::ArtifactSource::Slang,
-    "a program request with a define compiles with Slang");
+  for (const auto& variant : { std::make_pair("define", 0), std::make_pair("specialization", 1) }) {
+    vtkslang::CompileOptions o;
+    if (variant.second == 0)
+      o.defines = { { "UNUSED", "1" } };
+    else
+      o.specializations = { { "ILightingModel", "CookTorranceLighting" } };
+    vtkslang::Artifact v = compiler.compileProgram(p, o);
+    check(v && v.source == vtkslang::ArtifactSource::Slang,
+      (std::string("a program request with a ") + variant.first + " compiles with Slang").c_str());
+  }
 
   vtkslang::Program helper;
   helper.name    = "with_helper";
@@ -582,6 +665,7 @@ int main()
     testNestedReflection(compiler);
     testTextureDimensions();
     testSpecialization(compiler);
+    testOverrides(compiler);
     testCache();
   } else {
     std::printf("SKIP: Slang unavailable\n");
