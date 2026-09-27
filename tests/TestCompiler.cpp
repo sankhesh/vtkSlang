@@ -509,6 +509,11 @@ public struct ToonLighting : ILightingModel {
   vtkslang::CompileOptions both = toon;
   both.specializations.push_back({ "IMaterial", "StripedMaterial" });
   check(static_cast<bool>(compiler.compileProgram(host, both)), "both interfaces at once");
+
+  vtkslang::CompileOptions phong;
+  phong.specializations = { { "ILightingModel", "PhongLighting" } };
+  check(static_cast<bool>(compiler.compileProgram(host, phong)),
+    "the library's PhongLighting can replace a shader's default");
 }
 
 void testCache()

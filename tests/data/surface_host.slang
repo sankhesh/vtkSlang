@@ -3,7 +3,7 @@ import vtkslang_shading;
 type_param M : IMaterial;
 type_param L : ILightingModel;
 typealias Default_IMaterial      = HostDrivenMaterial;
-typealias Default_ILightingModel = LambertLighting;
+typealias Default_ILightingModel = PhongLighting;
 
 struct Scene
 {
