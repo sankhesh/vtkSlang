@@ -13,6 +13,9 @@ public struct HostMaterial
     public float  metallic      = 0.f;
     public float  roughness     = 1.f;
     public float3 emissive      = float3(0.f);
+    public float3 ambientColor  = float3(0.f);
+    public float3 specularColor = float3(0.f);
+    public float  specularPower = 1.f;
 };
 
 public struct SurfaceSample
@@ -33,6 +36,9 @@ public struct MaterialSample
     public float  metallic      = 0.f;
     public float  roughness     = 1.f;
     public float3 emissive      = float3(0.f);
+    public float3 ambientColor  = float3(0.f);
+    public float3 specularColor = float3(0.f);
+    public float  specularPower = 1.f;
 };
 
 public struct LightSample
@@ -63,7 +69,29 @@ public struct HostDrivenMaterial : IMaterial
         m.metallic  = s.host.metallic;
         m.roughness = s.host.roughness;
         m.emissive  = s.host.emissive;
+        m.ambientColor  = s.host.ambientColor;
+        m.specularColor = s.host.specularColor;
+        m.specularPower = s.host.specularPower;
         return m;
+    }
+};
+
+public struct PhongLighting : ILightingModel
+{
+    public float3 direct(MaterialSample m, SurfaceSample s, LightSample light)
+    {
+        float  df = max(dot(s.normal, light.direction), 0.f);
+        float3 r  = reflect(-light.direction, s.normal);
+        float  sf = pow(max(dot(s.viewDir, r), 0.f), m.specularPower);
+        return (df * m.baseColor + sf * m.specularColor) * light.radiance;
+    }
+    public float3 ambient(MaterialSample m, SurfaceSample s, float3 ambientRadiance)
+    {
+        return m.ambientColor * ambientRadiance;
+    }
+    public float3 resolve(float3 radiance, MaterialSample m)
+    {
+        return radiance;
     }
 };
 
