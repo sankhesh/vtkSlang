@@ -4,7 +4,7 @@
 module vtkslang_shading;
 import vtkslang_core;
 
-public static const int kShadingInterfaceVersion = 1;
+public static const int kShadingInterfaceVersion = 2;
 
 public struct HostMaterial
 {
@@ -18,14 +18,28 @@ public struct HostMaterial
     public float  specularPower = 1.f;
 };
 
+public struct CameraSample
+{
+    public float4x4 shadingToClip = float4x4(1.f, 0.f, 0.f, 0.f,
+                                             0.f, 1.f, 0.f, 0.f,
+                                             0.f, 0.f, 1.f, 0.f,
+                                             0.f, 0.f, 0.f, 1.f);
+    public bool     parallel      = false;
+};
+
 public struct SurfaceSample
 {
-    public float3       position = float3(0.f);
-    public float3       normal   = float3(0.f, 0.f, 1.f);
-    public float3       viewDir  = float3(0.f, 0.f, 1.f);
-    public float2       uv       = float2(0.f);
-    public float        scalar   = 0.f;
-    public uint4        userData = uint4(0u);
+    public float3       position    = float3(0.f);
+    public float3       normal      = float3(0.f, 0.f, 1.f);
+    public float3       viewDir     = float3(0.f, 0.f, 1.f);
+    public float2       uv          = float2(0.f);
+    public float        scalar      = 0.f;
+    public float4       fragCoord   = float4(0.f);
+    public uint         primitiveId = 0u;
+    public uint         cellId      = 0u;
+    public bool         frontFacing = true;
+    public uint4        userData    = uint4(0u);
+    public CameraSample camera;
     public HostMaterial host;
 };
 
@@ -57,6 +71,65 @@ public interface ILightingModel
     float3 direct(MaterialSample m, SurfaceSample s, LightSample light);
     float3 ambient(MaterialSample m, SurfaceSample s, float3 ambientRadiance);
     float3 resolve(float3 radiance, MaterialSample m);
+};
+
+public interface INormalModifier
+{
+    float3 normal(SurfaceSample s);
+};
+
+public interface ISurfaceOutput
+{
+    bool   keep(SurfaceSample s);
+    float4 finish(float4 color, MaterialSample m, SurfaceSample s);
+    float  depth(float depth, SurfaceSample s);
+};
+
+public struct VertexSample
+{
+    public float3   position = float3(0.f);
+    public float3   normal   = float3(0.f, 0.f, 1.f);
+    public float2   uv       = float2(0.f);
+    public float4   color    = float4(1.f);
+    public uint     pointId  = 0u;
+    public uint     cellId   = 0u;
+    public uint     primitiveId = 0u;
+    public float4x4 modelToClip = float4x4(1.f, 0.f, 0.f, 0.f,
+                                           0.f, 1.f, 0.f, 0.f,
+                                           0.f, 0.f, 1.f, 0.f,
+                                           0.f, 0.f, 0.f, 1.f);
+};
+
+public interface IVertexModifier
+{
+    VertexSample modify(VertexSample v);
+};
+
+public struct Shading<TM : IMaterial, TL : ILightingModel, TN : INormalModifier,
+                      TO : ISurfaceOutput, TV : IVertexModifier>
+{
+    public TM material;
+    public TL lighting;
+    public TN normal;
+    public TO output;
+    public TV vertex;
+};
+
+public struct GeometricNormal : INormalModifier
+{
+    public float3 normal(SurfaceSample s) { return s.normal; }
+};
+
+public struct StandardOutput : ISurfaceOutput
+{
+    public bool   keep(SurfaceSample s) { return true; }
+    public float4 finish(float4 color, MaterialSample m, SurfaceSample s) { return color; }
+    public float  depth(float depth, SurfaceSample s) { return depth; }
+};
+
+public struct IdentityVertex : IVertexModifier
+{
+    public VertexSample modify(VertexSample v) { return v; }
 };
 
 public struct HostDrivenMaterial : IMaterial
