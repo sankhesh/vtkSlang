@@ -516,6 +516,52 @@ public struct ToonLighting : ILightingModel {
     "the library's PhongLighting can replace a shader's default");
 }
 
+void testStageInterfaces(vtkslang::vtkSlangCompiler& compiler)
+{
+  using vtkslang::BindingKind;
+  const char* stages = R"(
+module test_stages;
+import vtkslang_shading;
+public struct Wobble : IVertexModifier {
+  public float amplitude;
+  public VertexSample modify(VertexSample v) {
+    v.position += v.normal * amplitude * sin(float(v.pointId));
+    return v;
+  }
+};
+public struct Bumps : INormalModifier {
+  public float strength;
+  public float3 normal(SurfaceSample s) {
+    return normalize(s.normal + strength * float3(sin(s.position.x), 0.f, 0.f));
+  }
+};
+public struct Cutout : ISurfaceOutput {
+  public float cutoff;
+  public bool keep(SurfaceSample s) { return frac(s.position.y) > cutoff; }
+  public float4 finish(float4 c, MaterialSample m, SurfaceSample s) { return float4(1.f - c.rgb, c.a); }
+  public float depth(float d, SurfaceSample s) { return d * 0.5f; }
+};
+)";
+  for (const char* shader : { "the host" }) {
+    vtkslang::CompileOptions o;
+    o.modules         = { stages };
+    o.specializations = { { "IVertexModifier", "Wobble" }, { "INormalModifier", "Bumps" },
+      { "ISurfaceOutput", "Cutout" } };
+    vtkslang::Artifact a = compiler.compileProgram(surfaceHost(), o);
+    const auto* block    = byName(a, "shading");
+    size_t      group0   = 0;
+    for (const auto& b : a.bindings)
+      group0 += b.group == 0 ? 1 : 0;
+    check(a && block && block->kind == BindingKind::UniformBuffer &&
+        field(block, "vertex.amplitude") && field(block, "normal.strength") &&
+        field(block, "output.cutoff") && group0 == 3 &&
+        reflectedBindings(a) == wgslBindings(a.wgsl),
+      (std::string(shader) + " takes vertex, normal, and output overrides with parameters").c_str());
+    if (!a)
+      std::printf("%s", a.diagnostics.c_str());
+  }
+}
+
 void testCache()
 {
   const char* src = R"(
@@ -671,6 +717,7 @@ int main()
     testTextureDimensions();
     testSpecialization(compiler);
     testOverrides(compiler);
+    testStageInterfaces(compiler);
     testCache();
   } else {
     std::printf("SKIP: Slang unavailable\n");
