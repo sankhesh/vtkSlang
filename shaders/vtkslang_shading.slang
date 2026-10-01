@@ -31,6 +31,7 @@ public struct SurfaceSample
 {
     public float3       position    = float3(0.f);
     public float3       normal      = float3(0.f, 0.f, 1.f);
+    public float3       tangent     = float3(0.f);
     public float3       viewDir     = float3(0.f, 0.f, 1.f);
     public float2       uv          = float2(0.f);
     public float        scalar      = 0.f;
@@ -89,6 +90,7 @@ public struct VertexSample
 {
     public float3   position = float3(0.f);
     public float3   normal   = float3(0.f, 0.f, 1.f);
+    public float3   tangent  = float3(0.f);
     public float2   uv       = float2(0.f);
     public float4   color    = float4(1.f);
     public uint     pointId  = 0u;
