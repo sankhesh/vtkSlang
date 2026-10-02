@@ -562,6 +562,76 @@ public struct Cutout : ISurfaceOutput {
   }
 }
 
+void testHooks(vtkslang::vtkSlangCompiler& compiler)
+{
+  using vtkslang::BindingKind;
+  const char* host = R"(
+import vtkslang_hooks;
+type_param H : IShaderHooks;
+typealias Default_IShaderHooks = DefaultHooks;
+[vk::binding(0, 0)] ConstantBuffer<HookBlock<H>> hookBlock;
+struct VSOut { float4 position : SV_Position; float2 uv : UV; };
+[shader("vertex")]
+VSOut vertexMain(float3 p : POSITION)
+{
+  VertexContext v = VertexContext();
+  v.positionMC = float4(p, 1.f);
+  hookBlock.hooks.vertex(v);
+  v.positionClip = v.positionMC;
+  hookBlock.hooks.position(v);
+  VSOut o;
+  o.position = v.positionClip;
+  o.uv = v.uv;
+  return o;
+}
+[shader("fragment")]
+float4 fragmentMain(VSOut i) : SV_Target
+{
+  FragmentContext f = FragmentContext();
+  f.uv = i.uv;
+  if (!hookBlock.hooks.clip(f))
+    discard;
+  hookBlock.hooks.color(f);
+  hookBlock.hooks.normal(f);
+  f.color = float4(f.diffuseColor, f.opacity);
+  hookBlock.hooks.lit(f);
+  hookBlock.hooks.output(f);
+  return f.color;
+}
+)";
+  const char* hooks = R"(
+module test_hooks;
+import vtkslang_hooks;
+public struct Ramp : IShaderHooks {
+  float3 tint;
+  Texture2D ramp;
+  SamplerState rampSampler;
+  public override void color(inout FragmentContext f) {
+    f.diffuseColor = ramp.Sample(rampSampler, f.uv).rgb * tint;
+  }
+  public override bool clip(inout FragmentContext f) { return f.uv.x > 0.1f; }
+};
+)";
+  vtkslang::Artifact plain = compiler.compileSource(host);
+  check(plain && !byName(plain, "hookBlock"),
+    "the default hooks are no-ops and bind nothing");
+  if (!plain)
+    std::printf("%s", plain.diagnostics.c_str());
+
+  vtkslang::CompileOptions o;
+  o.modules         = { hooks };
+  o.specializations = { { "IShaderHooks", "Ramp" } };
+  vtkslang::Artifact a = compiler.compileSource(host, {}, o);
+  const auto* block = byName(a, "hookBlock");
+  const auto* ramp  = byName(a, "hookBlock.hooks.ramp");
+  check(a && block && block->kind == BindingKind::UniformBuffer && field(block, "hooks.tint") &&
+      ramp && ramp->kind == BindingKind::SampledTexture && a.wgsl != plain.wgsl &&
+      reflectedBindings(a) == wgslBindings(a.wgsl),
+    "an IShaderHooks override takes parameters and textures and changes only what it overrides");
+  if (!a)
+    std::printf("%s", a.diagnostics.c_str());
+}
+
 void testCache()
 {
   const char* src = R"(
@@ -718,6 +788,7 @@ int main()
     testSpecialization(compiler);
     testOverrides(compiler);
     testStageInterfaces(compiler);
+    testHooks(compiler);
     testCache();
   } else {
     std::printf("SKIP: Slang unavailable\n");
