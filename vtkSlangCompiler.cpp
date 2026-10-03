@@ -874,6 +874,36 @@ vtkSlangCompiler::~vtkSlangCompiler()                                       = de
 vtkSlangCompiler::vtkSlangCompiler(vtkSlangCompiler&&) noexcept            = default;
 vtkSlangCompiler& vtkSlangCompiler::operator=(vtkSlangCompiler&&) noexcept = default;
 
+std::vector<std::string> vtkSlangCompiler::libraryModules()
+{
+  return std::vector<std::string>(std::begin(kLibraryModules), std::end(kLibraryModules));
+}
+
+std::string vtkSlangCompiler::librarySource(const std::string& name)
+{
+  for (const char* module : kLibraryModules) {
+    if (name == module) {
+      const char* source = vtkSlangSources::get(module);
+      return source ? source : "";
+    }
+  }
+  return {};
+}
+
+bool vtkSlangCompiler::writeLibraryModules(const std::string& directory)
+{
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  for (const char* module : kLibraryModules) {
+    std::ofstream file(std::filesystem::path(directory) / (std::string(module) + ".slang"),
+                       std::ios::binary | std::ios::trunc);
+    file << vtkSlangSources::get(module);
+    if (!file)
+      return false;
+  }
+  return true;
+}
+
 std::string vtkSlangCompiler::slangVersion()
 {
 #ifdef VTKSLANG_USE_SLANG

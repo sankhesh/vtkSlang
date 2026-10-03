@@ -126,6 +126,10 @@ public:
   static bool        slangAvailable();
   static std::string slangVersion();
 
+  static std::vector<std::string> libraryModules();
+  static std::string              librarySource(const std::string& name);
+  static bool                     writeLibraryModules(const std::string& directory);
+
   Artifact compileSource(const std::string& source,
                          const std::vector<std::string>& entryPoints = {},
                          const CompileOptions& options = {});
