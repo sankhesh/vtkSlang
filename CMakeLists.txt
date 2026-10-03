@@ -81,6 +81,7 @@ set(_SHADER_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 set(_SOURCES_HDR  "${CMAKE_CURRENT_BINARY_DIR}/vtkSlangSources.h")
 
 set(_SLANG_FILES
+  "${_SHADER_DIR}/vtkslang_attributes.slang"
   "${_SHADER_DIR}/vtkslang_core.slang"
   "${_SHADER_DIR}/vtkslang_shading.slang"
   "${_SHADER_DIR}/vtkslang_hooks.slang")

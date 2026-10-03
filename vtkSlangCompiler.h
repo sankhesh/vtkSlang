@@ -48,11 +48,19 @@ enum class TextureDimension
   CubeArray,
 };
 
+struct UserAttribute
+{
+  std::string              name;
+  std::vector<std::string> arguments;
+};
+
 struct UniformField
 {
-  std::string name;
-  uint64_t    offset = 0;
-  uint64_t    size   = 0;
+  std::string                name;
+  uint64_t                   offset = 0;
+  uint64_t                   size   = 0;
+  std::string                type;
+  std::vector<UserAttribute> attributes;
 };
 
 struct ReflectedBinding

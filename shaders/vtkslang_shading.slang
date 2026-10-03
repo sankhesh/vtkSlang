@@ -3,6 +3,7 @@
 
 module vtkslang_shading;
 import vtkslang_core;
+__exported import vtkslang_attributes;
 
 public static const int kShadingInterfaceVersion = 2;
 

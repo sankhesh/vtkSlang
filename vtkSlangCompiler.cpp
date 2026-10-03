@@ -49,8 +49,8 @@ Artifact failure(Target target, std::string message)
   return a;
 }
 
-const char* const kLibraryModules[] = { "vtkslang_core", "vtkslang_shading",
-  "vtkslang_hooks" };
+const char* const kLibraryModules[] = { "vtkslang_attributes", "vtkslang_core",
+  "vtkslang_shading", "vtkslang_hooks" };
 
 #ifdef VTKSLANG_USE_SLANG
 
@@ -133,6 +133,73 @@ std::string joinPath(const std::string& prefix, slang::VariableLayoutReflection*
   return prefix.empty() ? std::string(name) : prefix + "." + name;
 }
 
+const char* scalarName(slang::TypeReflection::ScalarType scalar)
+{
+  switch (scalar) {
+  case slang::TypeReflection::ScalarType::Bool:
+    return "bool";
+  case slang::TypeReflection::ScalarType::Int32:
+    return "int";
+  case slang::TypeReflection::ScalarType::UInt32:
+    return "uint";
+  case slang::TypeReflection::ScalarType::Float16:
+    return "half";
+  case slang::TypeReflection::ScalarType::Float32:
+    return "float";
+  default:
+    return "";
+  }
+}
+
+std::string typeName(slang::TypeReflection* type)
+{
+  if (!type)
+    return {};
+  switch (type->getKind()) {
+  case slang::TypeReflection::Kind::Scalar:
+    return scalarName(type->getScalarType());
+  case slang::TypeReflection::Kind::Vector:
+    return std::string(scalarName(type->getScalarType())) +
+      std::to_string(type->getElementCount());
+  case slang::TypeReflection::Kind::Matrix:
+    return std::string(scalarName(type->getScalarType())) +
+      std::to_string(type->getRowCount()) + "x" + std::to_string(type->getColumnCount());
+  case slang::TypeReflection::Kind::Array:
+    return typeName(type->getElementType()) + "[" + std::to_string(type->getElementCount()) + "]";
+  default:
+    return type->getName() ? type->getName() : "";
+  }
+}
+
+UserAttribute userAttribute(slang::UserAttribute* attribute)
+{
+  UserAttribute result;
+  result.name = attribute->getName() ? attribute->getName() : "";
+  for (unsigned i = 0; i < attribute->getArgumentCount(); ++i) {
+    slang::TypeReflection* type = attribute->getArgumentType(i);
+    std::string            text;
+    if (type && type->getKind() == slang::TypeReflection::Kind::Scalar &&
+        type->getScalarType() != slang::TypeReflection::ScalarType::Float32 &&
+        type->getScalarType() != slang::TypeReflection::ScalarType::Float16) {
+      int value = 0;
+      if (SLANG_SUCCEEDED(attribute->getArgumentValueInt(i, &value)))
+        text = std::to_string(value);
+    } else {
+      float value = 0.f;
+      size_t size = 0;
+      if (const char* string = attribute->getArgumentValueString(i, &size))
+        text.assign(string, size);
+      else if (SLANG_SUCCEEDED(attribute->getArgumentValueFloat(i, &value))) {
+        std::ostringstream stream;
+        stream << value;
+        text = stream.str();
+      }
+    }
+    result.arguments.push_back(std::move(text));
+  }
+  return result;
+}
+
 void collectUniformFields(slang::VariableLayoutReflection* v, uint64_t base,
                           const std::string& prefix, std::vector<UniformField>& out)
 {
@@ -151,6 +218,11 @@ void collectUniformFields(slang::VariableLayoutReflection* v, uint64_t base,
   field.name   = name;
   field.offset = offset;
   field.size   = size;
+  field.type   = typeName(type->getType());
+  if (slang::VariableReflection* variable = v->getVariable()) {
+    for (unsigned i = 0; i < variable->getUserAttributeCount(); ++i)
+      field.attributes.push_back(userAttribute(variable->getUserAttributeByIndex(i)));
+  }
   out.push_back(std::move(field));
 }
 
@@ -320,7 +392,7 @@ struct Reader
   }
 };
 
-constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-3\n";
+constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-4\n";
 
 std::string serialize(const std::string& key, const Artifact& a)
 {
@@ -346,6 +418,14 @@ std::string serialize(const std::string& key, const Artifact& a)
       putStr(out, f.name);
       putU64(out, f.offset);
       putU64(out, f.size);
+      putStr(out, f.type);
+      putU64(out, f.attributes.size());
+      for (const UserAttribute& attribute : f.attributes) {
+        putStr(out, attribute.name);
+        putU64(out, attribute.arguments.size());
+        for (const std::string& argument : attribute.arguments)
+          putStr(out, argument);
+      }
     }
   }
   putStr(out, a.diagnostics);
@@ -385,6 +465,16 @@ bool deserialize(const std::string& data, const std::string& key, Artifact& a)
       f.name   = r.str();
       f.offset = r.u64();
       f.size   = r.u64();
+      f.type   = r.str();
+      uint64_t attributeCount = r.u64();
+      for (uint64_t k = 0; r.ok && k < attributeCount; ++k) {
+        UserAttribute attribute;
+        attribute.name          = r.str();
+        uint64_t argumentCount = r.u64();
+        for (uint64_t n = 0; r.ok && n < argumentCount; ++n)
+          attribute.arguments.push_back(r.str());
+        f.attributes.push_back(std::move(attribute));
+      }
       b.fields.push_back(std::move(f));
     }
     a.bindings.push_back(std::move(b));
