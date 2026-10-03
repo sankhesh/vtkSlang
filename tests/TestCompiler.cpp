@@ -608,7 +608,7 @@ float4 fragmentMain(VSOut i) : SV_Target
 module test_hooks;
 import vtkslang_hooks;
 public struct Ramp : IShaderHooks {
-  float3 tint;
+  [Range(0, 2)] [Label("Tint")] float3 tint;
   Texture2D ramp;
   SamplerState rampSampler;
   public override void color(inout FragmentContext f) {
@@ -635,6 +635,28 @@ public struct Ramp : IShaderHooks {
     "an IShaderHooks override takes parameters and textures and changes only what it overrides");
   if (!a)
     std::printf("%s", a.diagnostics.c_str());
+
+  const auto* tint = field(block, "hooks.tint");
+  check(tint && tint->type == "float3" && tint->attributes.size() == 2 &&
+      tint->attributes[0].name == "Range" && tint->attributes[0].arguments.size() == 2 &&
+      tint->attributes[0].arguments[1] == "2" && tint->attributes[1].name == "Label" &&
+      tint->attributes[1].arguments.size() == 1 && tint->attributes[1].arguments[0] == "Tint",
+    "fields report their type and user attributes");
+
+  const std::string dir = std::string(VTKSLANG_TEST_TMP_DIR) + "/cache-attributes";
+  std::error_code   ec;
+  std::filesystem::remove_all(dir, ec);
+  bool cached = false;
+  for (int pass = 0; pass < 2; ++pass) {
+    vtkslang::vtkSlangCompiler c;
+    c.setCacheDirectory(dir);
+    vtkslang::Artifact r = c.compileSource(host, {}, o);
+    const auto* t = field(byName(r, "hookBlock"), "hooks.tint");
+    cached = r.fromCache && t && t->type == "float3" && t->attributes.size() == 2 &&
+      t->attributes[1].arguments[0] == "Tint";
+  }
+  check(cached, "types and attributes survive the disk cache");
+  std::filesystem::remove_all(dir, ec);
 }
 
 void testHostHooks(vtkslang::vtkSlangCompiler& compiler)
