@@ -46,7 +46,12 @@ vtkslang::Program surfaceHost()
 
 const char* kHostOverrides = R"(
 module host_overrides;
+import vtkslang_hooks;
 import vtkslang_shading;
+public struct Fade : IShaderHooks {
+  float amount;
+  public override void lit(inout FragmentContext f) { f.color.rgb *= amount; }
+};
 public struct Tint : IMaterial {
   float3 tint;
   public MaterialSample evaluate(SurfaceSample s) {
@@ -284,9 +289,9 @@ void run(uint3 id : SV_DispatchThreadID)
   vtkslang::CompileOptions hosted;
   hosted.reflect         = true;
   hosted.modules         = { kHostOverrides };
-  hosted.specializations = { { "IMaterial", "Tint" } };
+  hosted.specializations = { { "IMaterial", "Tint" }, { "IShaderHooks", "Fade" } };
   vtkslang::Artifact h   = compiler.compileProgram(surfaceHost(), hosted);
-  check(h && h.bindings.size() == 4 && reflectedBindings(h) == wgslBindings(h.wgsl),
+  check(h && h.bindings.size() == 5 && reflectedBindings(h) == wgslBindings(h.wgsl),
     "a host program's reflection matches its WGSL declarations exactly");
 }
 
@@ -632,6 +637,29 @@ public struct Ramp : IShaderHooks {
     std::printf("%s", a.diagnostics.c_str());
 }
 
+void testHostHooks(vtkslang::vtkSlangCompiler& compiler)
+{
+  using vtkslang::BindingKind;
+  const vtkslang::Program host = surfaceHost();
+  vtkslang::CompileOptions hooksOnly;
+  hooksOnly.modules         = { kHostOverrides };
+  hooksOnly.specializations = { { "IShaderHooks", "Fade" } };
+  vtkslang::Artifact a      = compiler.compileProgram(host, hooksOnly);
+  const auto*        h      = byName(a, "hookBlock");
+
+  vtkslang::CompileOptions both = hooksOnly;
+  both.specializations.push_back({ "IMaterial", "Tint" });
+  vtkslang::Artifact b = compiler.compileProgram(host, both);
+  const auto*        s = byName(b, "shading");
+  const auto*        g = byName(b, "hookBlock");
+  check(a && h && h->kind == BindingKind::UniformBuffer && field(h, "hooks.amount") && b && s &&
+      g && s->group == 1 && g->group == 2 && field(s, "material.tint") &&
+      reflectedBindings(b) == wgslBindings(b.wgsl),
+    "the host offers the shader hooks; their block follows the shading block");
+  if (!a)
+    std::printf("%s", a.diagnostics.c_str());
+}
+
 void testCache()
 {
   const char* src = R"(
@@ -789,6 +817,7 @@ int main()
     testOverrides(compiler);
     testStageInterfaces(compiler);
     testHooks(compiler);
+    testHostHooks(compiler);
     testCache();
   } else {
     std::printf("SKIP: Slang unavailable\n");
