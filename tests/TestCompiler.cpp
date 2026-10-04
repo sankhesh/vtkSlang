@@ -3,6 +3,8 @@
 
 #include "vtkSlangCompiler.h"
 
+#include <algorithm>
+
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -682,6 +684,26 @@ void testHostHooks(vtkslang::vtkSlangCompiler& compiler)
     std::printf("%s", a.diagnostics.c_str());
 }
 
+void testLibrarySources()
+{
+  using vtkslang::vtkSlangCompiler;
+  const auto modules = vtkSlangCompiler::libraryModules();
+  check(std::find(modules.begin(), modules.end(), "vtkslang_hooks") != modules.end() &&
+      vtkSlangCompiler::librarySource("vtkslang_hooks").find("interface IShaderHooks") !=
+        std::string::npos &&
+      vtkSlangCompiler::librarySource("no_such_module").empty(),
+    "library modules and their sources are available");
+
+  const std::string dir = std::string(VTKSLANG_TEST_TMP_DIR) + "/library";
+  std::error_code   ec;
+  std::filesystem::remove_all(dir, ec);
+  bool all = vtkSlangCompiler::writeLibraryModules(dir);
+  for (const auto& module : modules)
+    all = all && std::filesystem::exists(dir + "/" + module + ".slang");
+  check(all, "library modules can be written out for editors");
+  std::filesystem::remove_all(dir, ec);
+}
+
 void testCache()
 {
   const char* src = R"(
@@ -845,6 +867,7 @@ int main()
     std::printf("SKIP: Slang unavailable\n");
   }
   testDisableEnv(compiler);
+  testLibrarySources();
 
   std::printf("%d failure(s)\n", g_failures);
   return g_failures == 0 ? 0 : 1;
