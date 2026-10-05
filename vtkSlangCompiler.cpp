@@ -50,7 +50,7 @@ Artifact failure(Target target, std::string message)
 }
 
 const char* const kLibraryModules[] = { "vtkslang_attributes", "vtkslang_core",
-  "vtkslang_shading", "vtkslang_hooks" };
+  "vtkslang_shading", "vtkslang_hooks", "vtkslang_surface" };
 
 #ifdef VTKSLANG_USE_SLANG
 
