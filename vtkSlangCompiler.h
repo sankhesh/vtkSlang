@@ -48,6 +48,14 @@ enum class TextureDimension
   CubeArray,
 };
 
+enum class ScalarType
+{
+  Unknown,
+  Float32,
+  Int32,
+  UInt32,
+};
+
 struct UserAttribute
 {
   std::string              name;
@@ -60,6 +68,10 @@ struct UniformField
   uint64_t                   offset = 0;
   uint64_t                   size   = 0;
   std::string                type;
+  ScalarType                 scalar = ScalarType::Unknown;
+  uint32_t                   width  = 0;
+  uint32_t                   runs   = 0;
+  uint64_t                   stride = 0;
   std::vector<UserAttribute> attributes;
 };
 

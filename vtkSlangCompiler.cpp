@@ -171,6 +171,66 @@ std::string typeName(slang::TypeReflection* type)
   }
 }
 
+ScalarType scalarType(slang::TypeReflection::ScalarType scalar)
+{
+  switch (scalar) {
+  case slang::TypeReflection::ScalarType::Float32:
+    return ScalarType::Float32;
+  case slang::TypeReflection::ScalarType::Int32:
+    return ScalarType::Int32;
+  case slang::TypeReflection::ScalarType::UInt32:
+    return ScalarType::UInt32;
+  default:
+    return ScalarType::Unknown;
+  }
+}
+
+void fieldShape(slang::TypeLayoutReflection* type, UniformField& field)
+{
+  uint64_t count         = 1;
+  uint64_t elementStride = 0;
+  if (type->getKind() == slang::TypeReflection::Kind::Array) {
+    count         = type->getElementCount();
+    elementStride = type->getElementStride(kUniform);
+    type          = type->getElementTypeLayout();
+  }
+  uint32_t width = 0;
+  uint32_t runs  = 0;
+  switch (type->getKind()) {
+  case slang::TypeReflection::Kind::Scalar:
+    width = 1;
+    runs  = 1;
+    break;
+  case slang::TypeReflection::Kind::Vector:
+    width = static_cast<uint32_t>(type->getElementCount());
+    runs  = 1;
+    break;
+  case slang::TypeReflection::Kind::Matrix: {
+    const bool rowMajor = type->getMatrixLayoutMode() == SLANG_MATRIX_LAYOUT_ROW_MAJOR;
+    width = rowMajor ? type->getColumnCount() : type->getRowCount();
+    runs  = rowMajor ? type->getRowCount() : type->getColumnCount();
+    break;
+  }
+  default:
+    return;
+  }
+  const ScalarType scalar = scalarType(type->getScalarType());
+  const uint64_t   size   = type->getSize(kUniform);
+  if (scalar == ScalarType::Unknown || count == 0 || width == 0 || size % runs != 0)
+    return;
+  uint64_t stride = runs > 1 ? size / runs : size;
+  if (count > 1) {
+    if (runs == 1)
+      stride = elementStride;
+    else if (elementStride != runs * stride)
+      return;
+  }
+  field.scalar = scalar;
+  field.width  = width;
+  field.runs   = static_cast<uint32_t>(count * runs);
+  field.stride = stride;
+}
+
 UserAttribute userAttribute(slang::UserAttribute* attribute)
 {
   UserAttribute result;
@@ -219,6 +279,7 @@ void collectUniformFields(slang::VariableLayoutReflection* v, uint64_t base,
   field.offset = offset;
   field.size   = size;
   field.type   = typeName(type->getType());
+  fieldShape(type, field);
   if (slang::VariableReflection* variable = v->getVariable()) {
     for (unsigned i = 0; i < variable->getUserAttributeCount(); ++i)
       field.attributes.push_back(userAttribute(variable->getUserAttributeByIndex(i)));
@@ -392,7 +453,7 @@ struct Reader
   }
 };
 
-constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-4\n";
+constexpr std::string_view kCacheMagic = "VTKSLANG-CACHE-5\n";
 
 std::string serialize(const std::string& key, const Artifact& a)
 {
@@ -419,6 +480,10 @@ std::string serialize(const std::string& key, const Artifact& a)
       putU64(out, f.offset);
       putU64(out, f.size);
       putStr(out, f.type);
+      putU64(out, static_cast<uint64_t>(f.scalar));
+      putU64(out, f.width);
+      putU64(out, f.runs);
+      putU64(out, f.stride);
       putU64(out, f.attributes.size());
       for (const UserAttribute& attribute : f.attributes) {
         putStr(out, attribute.name);
@@ -466,6 +531,10 @@ bool deserialize(const std::string& data, const std::string& key, Artifact& a)
       f.offset = r.u64();
       f.size   = r.u64();
       f.type   = r.str();
+      f.scalar = static_cast<ScalarType>(r.u64());
+      f.width  = static_cast<uint32_t>(r.u64());
+      f.runs   = static_cast<uint32_t>(r.u64());
+      f.stride = r.u64();
       uint64_t attributeCount = r.u64();
       for (uint64_t k = 0; r.ok && k < attributeCount; ++k) {
         UserAttribute attribute;
