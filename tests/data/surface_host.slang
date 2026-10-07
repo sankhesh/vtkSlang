@@ -1,5 +1,4 @@
-import vtkslang_hooks;
-import vtkslang_shading;
+import vtkslang_surface;
 
 type_param M : IMaterial;
 type_param L : ILightingModel;
@@ -35,6 +34,26 @@ struct VertexOutput
     float2 uv         : UV;
 };
 
+struct HostSource : ISurfaceSource
+{
+    float3 texel;
+
+    void colors(inout FragmentContext f)
+    {
+        f.diffuseColor = scene.diffuseColor.rgb * texel;
+        f.opacity      = scene.diffuseColor.a;
+    }
+    SurfaceSample sample(FragmentContext f) { return surfaceSample(f); }
+    uint lightCount(SurfaceSample s) { return 1u; }
+    LightSample light(uint i, SurfaceSample s)
+    {
+        LightSample l = LightSample();
+        l.direction = normalize(scene.lightDirection.xyz);
+        return l;
+    }
+    float3 ambientRadiance(SurfaceSample s) { return float3(0.1f); }
+};
+
 [shader("vertex")]
 VertexOutput vertexMain(float3 position : POSITION, float3 normal : NORMAL, float2 uv : TEXCOORD0)
 {
@@ -43,58 +62,27 @@ VertexOutput vertexMain(float3 position : POSITION, float3 normal : NORMAL, floa
     v.normal      = normal;
     v.uv          = uv;
     v.modelToClip = scene.modelToClip;
-    v = shading.vertex.modify(v);
-    VertexContext c = VertexContext();
-    c.positionMC  = float4(v.position, 1.f);
-    c.normalMC    = v.normal;
-    c.uv          = v.uv;
-    c.modelToClip = v.modelToClip;
-    hookBlock.hooks.vertex(c);
-    c.positionClip = mul(scene.modelToClip, c.positionMC);
-    hookBlock.hooks.position(c);
+    VertexContext c;
+    v = shadeVertex(shading, hookBlock.hooks, v, c);
     VertexOutput o;
-    o.position   = c.positionClip;
-    o.positionVC = c.positionMC.xyz;
-    o.normal     = c.normalMC;
-    o.uv         = c.uv;
+    o.position   = projectVertex(hookBlock.hooks, c, mul(scene.modelToClip, float4(v.position, 1.f)));
+    o.positionVC = v.position;
+    o.normal     = v.normal;
+    o.uv         = v.uv;
     return o;
 }
 
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input, bool frontFacing : SV_IsFrontFace) : SV_Target
 {
+    HostSource source;
+    source.texel = colorTexture.Sample(colorSampler, input.uv).rgb;
     FragmentContext f = FragmentContext();
     f.positionVC  = float4(input.positionVC, 1.f);
     f.normalVC    = normalize(input.normal);
     f.uv          = input.uv;
     f.fragCoord   = input.position;
     f.frontFacing = frontFacing;
-    if (!hookBlock.hooks.clip(f))
-        discard;
-    f.diffuseColor = scene.diffuseColor.rgb * colorTexture.Sample(colorSampler, input.uv).rgb;
-    f.opacity      = scene.diffuseColor.a;
-    hookBlock.hooks.color(f);
-    hookBlock.hooks.normal(f);
-
-    SurfaceSample s = SurfaceSample();
-    s.position       = f.positionVC.xyz;
-    s.normal         = f.normalVC;
-    s.viewDir        = normalize(-f.positionVC.xyz);
-    s.uv             = f.uv;
-    s.fragCoord      = f.fragCoord;
-    s.frontFacing    = f.frontFacing;
-    s.host.baseColor = f.diffuseColor;
-    s.host.opacity   = f.opacity;
-    if (!shading.output.keep(s))
-        discard;
-    s.normal = shading.normal.normal(s);
-    MaterialSample m = shading.material.evaluate(s);
-    LightSample l = LightSample();
-    l.direction = normalize(scene.lightDirection.xyz);
-    float3 radiance = shading.lighting.ambient(m, s, float3(0.1f)) + shading.lighting.direct(m, s, l);
-    f.color = float4(shading.lighting.resolve(radiance, m) + m.emissive, m.opacity);
-    hookBlock.hooks.lit(f);
-    f.color = shading.output.finish(f.color, m, s);
-    hookBlock.hooks.output(f);
+    shadeSurface(shading, hookBlock.hooks, source, f);
     return f.color;
 }
