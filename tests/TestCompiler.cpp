@@ -777,6 +777,72 @@ void cached(uint3 id : SV_DispatchThreadID) { data[id.x] = data[id.x] + 1.f; }
   }
 }
 
+const char* kShapes = R"(
+struct Item { float3 a; float b; };
+struct Params {
+  float f; float3 v3; float4 v4; int2 i2; uint u;
+  float2x2 m22; float3x3 m33; float4x4 m44; float2x3 m23;
+  float3 a3[4]; float a1[4]; float3x3 am[2]; Item items[2];
+};
+ConstantBuffer<Params> params;
+RWStructuredBuffer<float4> outColor;
+[shader("compute")] [numthreads(1, 1, 1)]
+void run(uint3 id : SV_DispatchThreadID)
+{
+  Params p = params;
+  float4 r = float4(p.f, p.v3) + p.v4 + mul(p.m44, p.v4) + float4(mul(p.m33, p.v3), 1.f) +
+    float4(mul(p.m22, p.v4.xy), mul(p.m23, p.v3)) + float4(p.i2, p.u, 0.f);
+  r.xyz += p.a3[id.x] + mul(p.am[id.x], p.v3);
+  r.x += p.a1[id.x] + p.items[id.x].b;
+  outColor[0] = r;
+}
+)";
+
+bool hasShape(const vtkslang::UniformField* f, vtkslang::ScalarType scalar, uint32_t width,
+  uint32_t runs, uint64_t stride)
+{
+  return f && f->scalar == scalar && f->width == width && f->runs == runs && f->stride == stride;
+}
+
+void testFieldShapes(vtkslang::vtkSlangCompiler& compiler)
+{
+  using vtkslang::ScalarType;
+  vtkslang::Artifact a = compiler.compileSource(kShapes);
+  const auto*        p = byName(a, "params");
+  check(hasShape(field(p, "f"), ScalarType::Float32, 1, 1, 4) &&
+      hasShape(field(p, "v3"), ScalarType::Float32, 3, 1, 12) &&
+      hasShape(field(p, "v4"), ScalarType::Float32, 4, 1, 16) &&
+      hasShape(field(p, "i2"), ScalarType::Int32, 2, 1, 8) &&
+      hasShape(field(p, "u"), ScalarType::UInt32, 1, 1, 4),
+    "scalars and vectors are one run of their components");
+  check(hasShape(field(p, "m22"), ScalarType::Float32, 2, 2, 16) &&
+      hasShape(field(p, "m33"), ScalarType::Float32, 3, 3, 16) &&
+      hasShape(field(p, "m44"), ScalarType::Float32, 4, 4, 16) &&
+      hasShape(field(p, "m23"), ScalarType::Float32, 2, 3, 16),
+    "matrices are one run per column, 16 bytes apart");
+  check(hasShape(field(p, "a3"), ScalarType::Float32, 3, 4, 16) &&
+      hasShape(field(p, "a1"), ScalarType::Float32, 1, 4, 16) &&
+      hasShape(field(p, "am"), ScalarType::Float32, 3, 6, 16),
+    "arrays are one run per element or matrix column");
+  const auto* items = field(p, "items");
+  check(items && items->width == 0 && items->runs == 0, "arrays of structs have no shape");
+  if (!a)
+    std::printf("%s", a.diagnostics.c_str());
+
+  const std::string dir = std::string(VTKSLANG_TEST_TMP_DIR) + "/cache-shapes";
+  std::error_code   ec;
+  std::filesystem::remove_all(dir, ec);
+  bool cached = false;
+  for (int pass = 0; pass < 2; ++pass) {
+    vtkslang::vtkSlangCompiler c;
+    c.setCacheDirectory(dir);
+    vtkslang::Artifact r = c.compileSource(kShapes);
+    cached = r.fromCache && hasShape(field(byName(r, "params"), "am"), ScalarType::Float32, 3, 6, 16);
+  }
+  check(cached, "field shapes survive the disk cache");
+  std::filesystem::remove_all(dir, ec);
+}
+
 void testProgramWithoutSlang(vtkslang::vtkSlangCompiler& compiler)
 {
   const vtkslang::Program p = surfaceHost();
@@ -856,6 +922,7 @@ int main()
     testOptions(compiler);
     testReflection(compiler);
     testNestedReflection(compiler);
+    testFieldShapes(compiler);
     testTextureDimensions();
     testSpecialization(compiler);
     testOverrides(compiler);
