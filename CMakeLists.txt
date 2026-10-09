@@ -72,7 +72,7 @@ configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vtkSlangVersion.h.in"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangVersion.h"
   @ONLY)
-foreach(_header IN ITEMS vtkSlang.h vtkSlangCompiler.h vtkSlangWebGPU.h)
+foreach(_header IN ITEMS vtkSlang.h vtkSlangCompiler.h vtkSlangParameters.h vtkSlangWebGPU.h)
   configure_file("${CMAKE_CURRENT_SOURCE_DIR}/${_header}" "${_PUBLIC_INCLUDE_DIR}/${_header}"
     COPYONLY)
 endforeach()
@@ -101,7 +101,8 @@ add_custom_command(
 add_custom_target(vtkSlang_embed_shaders DEPENDS "${_SOURCES_HDR}")
 
 add_library(vtkSlang SHARED
-  vtkSlangCompiler.cpp)
+  vtkSlangCompiler.cpp
+  vtkSlangParameters.cpp)
 
 add_library(vtkSlang::vtkSlang ALIAS vtkSlang)
 
@@ -134,6 +135,7 @@ install(TARGETS vtkSlang
 install(FILES
   "${_PUBLIC_INCLUDE_DIR}/vtkSlang.h"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangCompiler.h"
+  "${_PUBLIC_INCLUDE_DIR}/vtkSlangParameters.h"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangWebGPU.h"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangVersion.h"
   "${_PUBLIC_INCLUDE_DIR}/vtkSlangExport.h"
