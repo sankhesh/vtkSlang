@@ -113,6 +113,8 @@ struct CompileOptions
   std::vector<std::pair<std::string, std::string>> specializations;
 
   std::vector<std::string> modules;
+
+  std::string label;
 };
 
 struct Program
@@ -149,6 +151,8 @@ public:
   Artifact compileProgram(const Program& program, const CompileOptions& options = {});
 
   void setCacheDirectory(const std::string& directory);
+
+  void setDumpDirectory(const std::string& directory);
 
 private:
   Artifact compileText(const std::string& source, const std::vector<std::string>& programModules,

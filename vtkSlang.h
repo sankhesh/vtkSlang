@@ -5,3 +5,4 @@
 
 #include "vtkSlangCompiler.h"
 #include "vtkSlangParameters.h"
+#include "vtkSlangReproducer.h"

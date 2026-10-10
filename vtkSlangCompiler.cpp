@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "vtkSlangCompiler.h"
+#include "vtkSlangReproducer.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -630,6 +631,20 @@ struct vtkSlangCompiler::SlangState
 
   std::string                               cacheDirectory;
   std::unordered_map<std::string, Artifact> memoryCache;
+  std::string                               dumpDirectory;
+
+  void dump(const Reproducer& reproducer, const Artifact& artifact) const
+  {
+    std::string directory = dumpDirectory;
+    if (directory.empty()) {
+      const char* env = std::getenv("VTKSLANG_DUMP_DIR");
+      directory       = env ? env : "";
+    }
+    if (!directory.empty())
+      writeReproducer(
+        (std::filesystem::path(directory) / reproducerName(reproducer)).string(), reproducer,
+        artifact);
+  }
 
   static std::string cacheKey(const std::string& what, const std::string& source,
                               const std::vector<std::string>& entryPoints,
@@ -1011,26 +1026,31 @@ Artifact vtkSlangCompiler::compileText(const std::string& source,
   merged.modules.insert(merged.modules.begin(), programModules.begin(), programModules.end());
 
   std::lock_guard<std::mutex> lock(m_slang->mutex);
-  const std::string key = SlangState::cacheKey("source", source, entryPoints, merged);
-  Artifact cached;
-  if (m_slang->lookup(key, cached))
-    return cached;
+  auto run = [&]() -> Artifact {
+    const std::string key = SlangState::cacheKey("source", source, entryPoints, merged);
+    Artifact cached;
+    if (m_slang->lookup(key, cached))
+      return cached;
 
-  std::string diagnostics;
-  auto* ts = m_slang->session(merged, diagnostics);
-  if (!ts)
-    return failure(merged.target, diagnostics);
-  std::vector<slang::IModule*> extra;
-  if (!m_slang->loadOptionModules(ts, merged, extra, diagnostics))
-    return failure(merged.target, diagnostics);
+    std::string diagnostics;
+    auto* ts = m_slang->session(merged, diagnostics);
+    if (!ts)
+      return failure(merged.target, diagnostics);
+    std::vector<slang::IModule*> extra;
+    if (!m_slang->loadOptionModules(ts, merged, extra, diagnostics))
+      return failure(merged.target, diagnostics);
 
-  std::string name = "vtkslang_user_" + std::to_string(m_slang->userModuleCount++);
-  slang::IModule* module = m_slang->loadSource(*ts, name, source.c_str(), diagnostics);
-  if (!module)
-    return failure(merged.target, diagnostics);
-  Artifact a =
-    m_slang->compile(*ts, merged, module, extra, entryPoints, std::move(diagnostics));
-  m_slang->store(key, a);
+    std::string name = "vtkslang_user_" + std::to_string(m_slang->userModuleCount++);
+    slang::IModule* module = m_slang->loadSource(*ts, name, source.c_str(), diagnostics);
+    if (!module)
+      return failure(merged.target, diagnostics);
+    Artifact a =
+      m_slang->compile(*ts, merged, module, extra, entryPoints, std::move(diagnostics));
+    m_slang->store(key, a);
+    return a;
+  };
+  Artifact a = run();
+  m_slang->dump(Reproducer{ source, programModules, entryPoints, options }, a);
   return a;
 #else
   (void)source;
@@ -1055,7 +1075,20 @@ Artifact vtkSlangCompiler::compileProgram(const Program& program, const CompileO
       }
     }
   }
-  return compileText(program.source, program.modules, program.entryPoints, options);
+  CompileOptions labeled = options;
+  if (labeled.label.empty())
+    labeled.label = program.name;
+  return compileText(program.source, program.modules, program.entryPoints, labeled);
+}
+
+void vtkSlangCompiler::setDumpDirectory(const std::string& directory)
+{
+#ifdef VTKSLANG_USE_SLANG
+  std::lock_guard<std::mutex> lock(m_slang->mutex);
+  m_slang->dumpDirectory = directory;
+#else
+  (void)directory;
+#endif
 }
 
 void vtkSlangCompiler::setCacheDirectory(const std::string& directory)
