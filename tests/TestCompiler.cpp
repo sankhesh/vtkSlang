@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "vtkSlangCompiler.h"
+#include "vtkSlangReproducer.h"
 
 #include <algorithm>
 
@@ -843,16 +844,107 @@ void testFieldShapes(vtkslang::vtkSlangCompiler& compiler)
   std::filesystem::remove_all(dir, ec);
 }
 
+const char* kPaint = R"(
+module test_paint;
+import vtkslang_hooks;
+public struct Paint : IShaderHooks {
+  float3 tint;
+  public override void output(inout FragmentContext f) { f.color = float4(tint, 1.f); }
+};
+)";
+
+void setEnv(const char* name, const char* value)
+{
+#ifdef _WIN32
+  _putenv_s(name, value ? value : "");
+#else
+  if (value)
+    setenv(name, value, 1);
+  else
+    unsetenv(name);
+#endif
+}
+
+void testReproducer()
+{
+  namespace fs = std::filesystem;
+  const fs::path  dir = fs::path(VTKSLANG_TEST_TMP_DIR) / "dump";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+
+  vtkslang::vtkSlangCompiler compiler;
+  compiler.setDumpDirectory(dir.string());
+  vtkslang::CompileOptions o;
+  o.modules         = { kPaint };
+  o.specializations = { { "IShaderHooks", "Paint" } };
+  o.label           = "host paint/1";
+  vtkslang::Artifact painted = compiler.compileProgram(surfaceHost(), o);
+  const fs::path     bundle  = dir / "host-paint-1";
+  const std::string  options = readFile((bundle / "options.txt").string());
+  check(painted && options.find("label host paint/1\n") != std::string::npos &&
+      options.find("specialize IShaderHooks=Paint\n") != std::string::npos &&
+      readFile((bundle / "program.slang").string()) == surfaceHost().source &&
+      readFile((bundle / "module0.slang").string()) == kPaint &&
+      !fs::exists(bundle / "program-module0.slang") &&
+      readFile((bundle / "output.wgsl").string()) == painted.wgsl,
+    "a labeled compile writes a bundle named after its label");
+
+  vtkslang::Reproducer r;
+  std::string          error;
+  vtkslang::vtkSlangCompiler fresh;
+  check(vtkslang::readReproducer(bundle.string(), r, error) && r.programModules.empty() &&
+      r.options.label == o.label && r.options.modules == o.modules &&
+      r.options.specializations == o.specializations &&
+      fresh.compileSource(r.source, r.entryPoints, r.options).wgsl == painted.wgsl,
+    "a program bundle replays to the same WGSL");
+
+  vtkslang::Artifact shapes = compiler.compileSource(kShapes);
+  fs::path           unlabeled;
+  for (const auto& entry : fs::directory_iterator(dir))
+    if (entry.path().filename().string().rfind("compile-", 0) == 0)
+      unlabeled = entry.path();
+  check(!unlabeled.empty() && vtkslang::readReproducer(unlabeled.string(), r, error) &&
+      r.source == kShapes &&
+      fresh.compileSource(r.source, r.entryPoints, r.options).wgsl == shapes.wgsl,
+    "an unlabeled compile is named by its hash and replays to the same WGSL");
+
+  vtkslang::CompileOptions brokenOptions;
+  brokenOptions.label = "broken";
+  check(!compiler.compileSource("this is not Slang", {}, brokenOptions) &&
+      !readFile((dir / "broken" / "diagnostics.txt").string()).empty() &&
+      !fs::exists(dir / "broken" / "output.wgsl"),
+    "a failed compile writes its diagnostics");
+
+  const fs::path envDir = fs::path(VTKSLANG_TEST_TMP_DIR) / "dump-env";
+  fs::remove_all(envDir, ec);
+  setEnv("VTKSLANG_DUMP_DIR", envDir.string().c_str());
+  vtkslang::vtkSlangCompiler fromEnv;
+  vtkslang::CompileOptions   labeled;
+  labeled.label = "from-env";
+  fromEnv.compileSource(kShapes, {}, labeled);
+  setEnv("VTKSLANG_DUMP_DIR", nullptr);
+  check(fs::exists(envDir / "from-env" / "program.slang"), "VTKSLANG_DUMP_DIR turns the dump on");
+  check(!vtkslang::readReproducer((dir / "missing").string(), r, error) && !error.empty(),
+    "a missing bundle is reported");
+  fs::remove_all(dir, ec);
+  fs::remove_all(envDir, ec);
+}
+
 void testProgramWithoutSlang(vtkslang::vtkSlangCompiler& compiler)
 {
   const vtkslang::Program p = surfaceHost();
   vtkslang::Artifact      a = compiler.compileProgram(p);
   check(a && a.source == vtkslang::ArtifactSource::Precompiled && a.wgsl == p.precompiled[0].wgsl,
     "a plain program request returns its precompiled artifact");
+  vtkslang::CompileOptions labeled;
+  labeled.label = "only a label";
+  check(compiler.compileProgram(p, labeled).source == vtkslang::ArtifactSource::Precompiled,
+    "a label alone keeps the precompiled artifact");
 }
 
 void testProgram(vtkslang::vtkSlangCompiler& compiler)
 {
+  namespace fs = std::filesystem;
   const vtkslang::Program p = surfaceHost();
 
   vtkslang::CompileOptions spirv;
@@ -893,6 +985,31 @@ void main(uint3 id : SV_DispatchThreadID) { data[id.x] = brighten(data[id.x]); }
   user.modules = { "module user_util;\nimport host_util;\npublic float twice(float x) { return brighten(brighten(x)); }\n" };
   check(static_cast<bool>(compiler.compileProgram(helper, user)),
     "program modules load before user modules, which can import them");
+
+  const fs::path  dir = fs::path(VTKSLANG_TEST_TMP_DIR) / "dump-program";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  vtkslang::vtkSlangCompiler dumping;
+  dumping.setDumpDirectory(dir.string());
+  dumping.compileProgram(helper, user);
+  const fs::path bundle = dir / "with_helper";
+  check(fs::exists(bundle / "program.slang") &&
+      readFile((bundle / "program-module0.slang").string()) == helper.modules[0] &&
+      readFile((bundle / "module0.slang").string()) == user.modules[0] &&
+      !fs::exists(bundle / "module1.slang"),
+    "a program's bundle is named after the program and keeps its modules apart from the user's");
+  vtkslang::Reproducer bundled;
+  std::string          error;
+  vtkslang::Program    replayed;
+  const bool           read = vtkslang::readReproducer(bundle.string(), bundled, error);
+  replayed.source           = bundled.source;
+  replayed.modules          = bundled.programModules;
+  replayed.entryPoints      = bundled.entryPoints;
+  check(read && bundled.programModules == helper.modules &&
+      bundled.options.modules == user.modules &&
+      static_cast<bool>(compiler.compileProgram(replayed, bundled.options)),
+    "a program bundle replays with its program modules");
+  fs::remove_all(dir, ec);
 }
 
 void testDisableEnv(vtkslang::vtkSlangCompiler& compiler)
@@ -930,6 +1047,7 @@ int main()
     testHooks(compiler);
     testHostHooks(compiler);
     testCache();
+    testReproducer();
   } else {
     std::printf("SKIP: Slang unavailable\n");
   }
