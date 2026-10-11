@@ -73,4 +73,6 @@ VTKSLANG_EXPORT PackStatus pack(
 VTKSLANG_EXPORT std::vector<std::string> unmatched(
   const BindingPlan& plan, const std::vector<std::string>& names);
 
+VTKSLANG_EXPORT std::string parameterSchema(const BindingPlan& plan);
+
 }

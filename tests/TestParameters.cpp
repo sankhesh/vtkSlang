@@ -203,6 +203,55 @@ void testPack(vtkslang::vtkSlangCompiler& compiler)
   check(!vtkslang::findField(block, "nope"), "an unknown name has no field");
 }
 
+const char* kRampHooks = R"(
+module schema_hooks;
+import vtkslang_hooks;
+public struct Ramp : IShaderHooks {
+  [Range(0, 2)] [Label("Tint")] float3 tint;
+  Texture2D ramp;
+  SamplerState rampSampler;
+  public override void color(inout FragmentContext f) {
+    f.diffuseColor = ramp.SampleLevel(rampSampler, f.uv, 0.f).rgb * tint;
+  }
+};
+)";
+
+bool contains(const std::string& text, const std::string& part)
+{
+  const bool found = text.find(part) != std::string::npos;
+  if (!found)
+    std::printf("  missing: %s\n", part.c_str());
+  return found;
+}
+
+void testSchema(vtkslang::vtkSlangCompiler& compiler)
+{
+  vtkslang::CompileOptions o;
+  o.modules         = { kRampHooks };
+  o.specializations = { { "IShaderHooks", "Ramp" } };
+  vtkslang::Artifact a =
+    compiler.compileSource(readSource(VTKSLANG_SOURCE_DIR "/tests/data/surface_host.slang"), {}, o);
+  if (!a)
+    std::printf("%s", a.diagnostics.c_str());
+  const std::string schema = vtkslang::parameterSchema(vtkslang::planBindings(
+    a, [](const vtkslang::ReflectedBinding& b) { return b.group == 0; }));
+  check(contains(schema, R"("name": "hooks.tint", "type": "float3", "scalar": "float", "width": 3, "runs": 1)") &&
+      contains(schema, R"({"name": "Range", "arguments": ["0", "2"]}, {"name": "Label", "arguments": ["Tint"]})"),
+    "the schema lists fields with their shape and attributes");
+  check(contains(schema, R"("field": "hooks.ramp", "kind": "texture", "dimension": "2d")") &&
+      contains(schema, R"("field": "hooks.rampSampler", "kind": "sampler")") &&
+      contains(schema, R"("texture": 0})"),
+    "the schema lists textures and pairs samplers with them");
+
+  vtkslang::BindingPlan manual;
+  manual.blocks.push_back({ "a\"b\\c\n", 0, 0, 16, {} });
+  check(contains(vtkslang::parameterSchema(manual), R"("name": "a\"b\\c\u000a")"),
+    "names are escaped");
+  check(vtkslang::parameterSchema(vtkslang::BindingPlan()) ==
+      "{\n  \"blocks\": [],\n  \"resources\": []\n}\n",
+    "an empty plan has empty lists");
+}
+
 }
 
 int main()
@@ -214,6 +263,7 @@ int main()
   vtkslang::vtkSlangCompiler compiler;
   testPlan(compiler);
   testPack(compiler);
+  testSchema(compiler);
   std::printf("%d failure(s)\n", g_failures);
   return g_failures == 0 ? 0 : 1;
 }

@@ -4,7 +4,9 @@
 #include "vtkSlangParameters.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <sstream>
 #include <tuple>
 
 namespace vtkslang {
@@ -33,6 +35,78 @@ std::string relativeName(const std::string& name)
 {
   const size_t dot = name.find('.');
   return dot == std::string::npos ? name : name.substr(dot + 1);
+}
+
+std::string quoted(const std::string& text)
+{
+  std::string out = "\"";
+  for (unsigned char c : text) {
+    if (c == '"' || c == '\\') {
+      out += '\\';
+      out += static_cast<char>(c);
+    } else if (c < 0x20) {
+      char escape[8];
+      std::snprintf(escape, sizeof escape, "\\u%04x", c);
+      out += escape;
+    } else {
+      out += static_cast<char>(c);
+    }
+  }
+  return out + "\"";
+}
+
+const char* scalarName(ScalarType scalar)
+{
+  switch (scalar) {
+  case ScalarType::Float32:
+    return "float";
+  case ScalarType::Int32:
+    return "int";
+  case ScalarType::UInt32:
+    return "uint";
+  default:
+    return "unknown";
+  }
+}
+
+const char* kindName(BindingKind kind)
+{
+  switch (kind) {
+  case BindingKind::UniformBuffer:
+    return "uniform";
+  case BindingKind::ReadOnlyStorageBuffer:
+    return "read-only-storage";
+  case BindingKind::StorageBuffer:
+    return "storage";
+  case BindingKind::SampledTexture:
+    return "texture";
+  case BindingKind::StorageTexture:
+    return "storage-texture";
+  case BindingKind::Sampler:
+    return "sampler";
+  default:
+    return "other";
+  }
+}
+
+const char* dimensionName(TextureDimension dimension)
+{
+  switch (dimension) {
+  case TextureDimension::D1:
+    return "1d";
+  case TextureDimension::D2:
+    return "2d";
+  case TextureDimension::D2Array:
+    return "2d-array";
+  case TextureDimension::D3:
+    return "3d";
+  case TextureDimension::Cube:
+    return "cube";
+  case TextureDimension::CubeArray:
+    return "cube-array";
+  default:
+    return "none";
+  }
 }
 
 }
@@ -146,6 +220,44 @@ std::vector<std::string> unmatched(const BindingPlan& plan, const std::vector<st
       result.push_back(name);
   }
   return result;
+}
+
+std::string parameterSchema(const BindingPlan& plan)
+{
+  std::ostringstream out;
+  out << "{\n  \"blocks\": [";
+  for (size_t i = 0; i < plan.blocks.size(); ++i) {
+    const BindingPlan::Block& b = plan.blocks[i];
+    out << (i ? "," : "") << "\n    {\"name\": " << quoted(b.name) << ", \"group\": " << b.group
+        << ", \"binding\": " << b.binding << ", \"sizeBytes\": " << b.sizeBytes
+        << ", \"fields\": [";
+    for (size_t j = 0; j < b.fields.size(); ++j) {
+      const UniformField& f = b.fields[j];
+      out << (j ? "," : "") << "\n      {\"name\": " << quoted(f.name)
+          << ", \"type\": " << quoted(f.type) << ", \"scalar\": " << quoted(scalarName(f.scalar))
+          << ", \"width\": " << f.width << ", \"runs\": " << f.runs << ", \"offset\": " << f.offset
+          << ", \"size\": " << f.size << ", \"stride\": " << f.stride << ", \"attributes\": [";
+      for (size_t k = 0; k < f.attributes.size(); ++k) {
+        const UserAttribute& a = f.attributes[k];
+        out << (k ? ", " : "") << "{\"name\": " << quoted(a.name) << ", \"arguments\": [";
+        for (size_t n = 0; n < a.arguments.size(); ++n)
+          out << (n ? ", " : "") << quoted(a.arguments[n]);
+        out << "]}";
+      }
+      out << "]}";
+    }
+    out << (b.fields.empty() ? "]}" : "\n    ]}");
+  }
+  out << (plan.blocks.empty() ? "]" : "\n  ]") << ",\n  \"resources\": [";
+  for (size_t i = 0; i < plan.resources.size(); ++i) {
+    const BindingPlan::Resource& r = plan.resources[i];
+    out << (i ? "," : "") << "\n    {\"name\": " << quoted(r.name) << ", \"field\": " << quoted(r.field)
+        << ", \"kind\": " << quoted(kindName(r.kind))
+        << ", \"dimension\": " << quoted(dimensionName(r.viewDimension)) << ", \"group\": " << r.group
+        << ", \"binding\": " << r.binding << ", \"texture\": " << r.texture << "}";
+  }
+  out << (plan.resources.empty() ? "]" : "\n  ]") << "\n}\n";
+  return out.str();
 }
 
 }
