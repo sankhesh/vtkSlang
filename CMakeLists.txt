@@ -127,6 +127,21 @@ generate_export_header(vtkSlang
   EXPORT_MACRO_NAME VTKSLANG_EXPORT
   EXPORT_FILE_NAME  "${_PUBLIC_INCLUDE_DIR}/vtkSlangExport.h")
 
+option(VTKSLANG_BUILD_TOOLS "Build the vtkslangc command line tool" ${PROJECT_IS_TOP_LEVEL})
+if(VTKSLANG_SLANG_ENABLED AND VTKSLANG_BUILD_TOOLS)
+  find_program(VTKSLANG_TINT_EXECUTABLE tint
+    DOC "tint executable that vtkslangc uses by default to validate WGSL")
+  set(_tint "")
+  if(VTKSLANG_TINT_EXECUTABLE)
+    set(_tint "${VTKSLANG_TINT_EXECUTABLE}")
+  endif()
+  add_executable(vtkslangc tools/vtkslangc.cpp)
+  add_executable(vtkSlang::vtkslangc ALIAS vtkslangc)
+  target_link_libraries(vtkslangc PRIVATE vtkSlang)
+  target_compile_definitions(vtkslangc PRIVATE VTKSLANG_TINT_EXECUTABLE="${_tint}")
+  install(TARGETS vtkslangc EXPORT vtkSlangTargets RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
 install(TARGETS vtkSlang
   EXPORT  vtkSlangTargets
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
